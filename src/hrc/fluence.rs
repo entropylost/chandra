@@ -103,7 +103,7 @@ pub trait FluenceType: 'static + Copy {
 
 pub trait Radiance: Value {
     // Use *0.5 instead of /2.0 since that actually matters.
-    fn merge(a: Expr<Self>, b: Expr<Self>) -> Expr<Self>;
+    fn merge(xs: [Expr<Self>; 4]) -> Expr<Self>;
     fn blend(a: Expr<Self>, b: Expr<Self>) -> Expr<Self>;
     fn blend_n(v: &[Expr<Self>]) -> Expr<Self>;
     fn scale(this: Expr<Self>, scale: Expr<f32>) -> Expr<Self>;
@@ -118,8 +118,8 @@ pub trait Radiance: Value {
 
 impl Radiance for f32 {
     #[tracked]
-    fn merge(a: Expr<Self>, b: Expr<Self>) -> Expr<Self> {
-        a + b
+    fn merge(xs: [Expr<Self>; 4]) -> Expr<Self> {
+        xs[0] + xs[1] + xs[2] + xs[3]
     }
     #[tracked]
     fn blend(a: Expr<Self>, b: Expr<Self>) -> Expr<Self> {
@@ -144,8 +144,8 @@ impl Radiance for f32 {
 }
 impl Radiance for Vec3<f32> {
     #[tracked]
-    fn merge(a: Expr<Self>, b: Expr<Self>) -> Expr<Self> {
-        a + b
+    fn merge(xs: [Expr<Self>; 4]) -> Expr<Self> {
+        xs[0] + xs[1] + xs[2] + xs[3]
     }
     #[tracked]
     fn blend(a: Expr<Self>, b: Expr<Self>) -> Expr<Self> {
@@ -170,8 +170,8 @@ impl Radiance for Vec3<f32> {
 }
 impl Radiance for Vec3<f16> {
     #[tracked]
-    fn merge(a: Expr<Self>, b: Expr<Self>) -> Expr<Self> {
-        a + b
+    fn merge(xs: [Expr<Self>; 4]) -> Expr<Self> {
+        xs[0] + xs[1] + xs[2] + xs[3]
     }
     #[tracked]
     fn blend(a: Expr<Self>, b: Expr<Self>) -> Expr<Self> {

@@ -90,51 +90,6 @@ impl Grid {
     pub fn expr(size: Expr<Vec3<u32>>, directions: Expr<u32>) -> Expr<Grid> {
         Grid::from_comps_expr(GridComps { size, directions })
     }
-    pub fn offset(self, dir: Vec2<f32>) -> Vec2<f32> {
-        2.0 * dir - Vec2::splat(self.directions as f32) + Vec2::splat(1.0)
-    }
-    pub fn angle_size(self, dir: Vec2<u32>) -> f32 {
-        // https://vixra.org/pdf/2001.0603v2.pdf
-        fn area_to(size: Vec2<f32>) -> f32 {
-            ((size.x * size.y) / (1.0 + size.x * size.x + size.y * size.y).sqrt()).atan()
-        }
-        let dir = Vec2::new(dir.x as f32, dir.y as f32);
-
-        let upper = self.offset(dir + Vec2::splat(0.5)) / self.directions as f32;
-        println!("{:?}", upper);
-        let lower = self.offset(dir - Vec2::splat(0.5)) / self.directions as f32;
-        println!("{:?}", lower);
-
-        area_to(upper) - area_to(Vec2::new(upper.x, lower.y)) - area_to(Vec2::new(lower.x, upper.y))
-            + area_to(lower)
-    }
-}
-
-#[test]
-fn test_angle_size() {
-    use std::f32::consts::PI;
-    let grid = Grid::new(Vec3::splat(64), 1);
-    let circle_size = 4.0 * PI / 6.0;
-    fn area_to(size: Vec2<f32>) -> f32 {
-        ((size.x * size.y) / (1.0 + size.x * size.x + size.y * size.y).sqrt()).atan()
-    }
-    assert!(
-        (4.0 * area_to(Vec2::new(1.0, 1.0)) - circle_size).abs() < 0.01,
-        "Error: {:?}, cmp: {:?}",
-        4.0 * area_to(Vec2::new(1.0, 1.0)),
-        circle_size
-    );
-
-    for level in 0..4 {
-        let grid = grid.shift(level);
-        let mut total_size = 0.0;
-        for i in 0..grid.directions {
-            for j in 0..grid.directions {
-                total_size += grid.angle_size(Vec2::new(i, j));
-            }
-        }
-        assert!((total_size - circle_size).abs() < 0.01, "{:?}", total_size);
-    }
 }
 
 impl GridExpr {

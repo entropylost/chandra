@@ -1,5 +1,3 @@
-use std::f32::consts::PI;
-
 use glam::{Mat3 as FMat3, UVec3};
 use hrc::storage::{BufferStorage, RadianceStorage};
 use hrc::trace::{VoxelTracer, WorldMapper};
@@ -55,14 +53,6 @@ impl Camera {
 type Color = hrc::color::Color<hrc::color::BinaryF32>;
 type Fluence = hrc::fluence::Fluence<hrc::fluence::BinaryF32>;
 
-#[derive(Debug, Clone, Copy, Value)]
-#[repr(C)]
-struct Line {
-    start: Vec3<f32>,
-    end: Vec3<f32>,
-    level: u32,
-}
-
 // do sudo nvidia-smi --lock-gpu-clocks=405,1500 before running to make it have fixed time.
 // nvidia-smi -q -d SUPPORTED_CLOCKS
 fn main() {
@@ -88,6 +78,9 @@ fn main() {
     let mut voxels = vec![255; size.element_product() as usize];
     for voxel in &model.voxels {
         let pos = UVec3::new(voxel.x as u32, voxel.y as u32, voxel.z as u32);
+        // if pos.cmpeq(UVec3::splat(0)).any() || pos.cmpge(size - 1).any() {
+        //     continue;
+        // }
         voxels[to_linear(pos, size)] = voxel.i;
     }
     let voxels = DEVICE.create_buffer_from_slice(&voxels);
@@ -104,21 +97,12 @@ fn main() {
         })
         .collect::<Vec<_>>();
 
-    let lines = DEVICE.create_buffer::<Line>(10000);
-    let line_count = Singleton::<u32>::new();
+    let final_radiance = DEVICE.create_buffer::<f32>((base_size * base_size * base_size) as usize);
 
     let voxel_tracer = VoxelTracer {
         palette: color_palette.view(..),
         buffer: voxels.view(..),
         size,
-    };
-    let tracer = WorldMapper::<hrc::fluence::BinaryF32, _> {
-        tracer: voxel_tracer,
-        lines: lines.view(..),
-        line_count,
-        rotation: Mat3::from(glam::Mat3::IDENTITY * 64.0),
-        offset: Vec3::splat(0.5),
-        _marker: Default::default(),
     };
     let axes = [
         Axis::CellX,
@@ -128,8 +112,15 @@ fn main() {
         Axis::DirectionV,
     ];
 
-    let merge = DEVICE.create_kernel::<fn(u32, Buffer<f32>, Buffer<f32>)>(&track!(
-        |level, buffer, next_buffer| {
+    let merge = DEVICE.create_kernel::<fn(u32, Buffer<f32>, Buffer<f32>, Mat3, Vec3<f32>)>(
+        &track!(|level, buffer, next_buffer, rotation, offset| {
+            let tracer = WorldMapper::<hrc::fluence::BinaryF32, _> {
+                tracer: &voxel_tracer,
+                rotation,
+                offset,
+                _marker: Default::default(),
+            };
+
             let grid = Grid::expr(
                 Vec3::expr(base_size, base_size, base_size >> level),
                 1 << level,
@@ -146,16 +137,54 @@ fn main() {
             };
             let radiance = hrc::merge(grid, probe, &storage, &tracer);
             BufferStorage { axes, buffer }.store(grid, probe, radiance);
+        }),
+    );
+    let copy_final = DEVICE.create_kernel::<fn(Mat3, Vec3<f32>)>(&track!(|rotation, offset| {
+        let probe = Probe::expr(dispatch_id().cast_i32(), Vec2::splat_expr(0));
+        let radiance = BufferStorage {
+            axes,
+            buffer: buffer_pyramid[0].var(),
         }
-    ));
+        .load(base_grid.expr(), probe);
+        let pos_norm = dispatch_id().cast_f32() / base_size as f32;
+        let pos = rotation * pos_norm + offset;
+        let pos = pos.cast_u32();
+        let index = to_linear_expr(pos, size);
+        final_radiance.write(index, final_radiance.read(index) + radiance);
+    }));
 
-    for level in (0..base_size.trailing_zeros()).rev() {
-        merge.dispatch(
-            [base_grid.shift(level).size(), 1, 1],
-            &level,
-            &buffer_pyramid[level as usize],
-            &buffer_pyramid[(level + 1) as usize],
+    let dirs = [UVec3::X, UVec3::Y, UVec3::Z];
+    let transforms = (0..3).flat_map(|i| {
+        let dir = dirs[i];
+        let perp1 = dirs[(i + 1) % 3];
+        let perp2 = dirs[(i + 2) % 3];
+        let rotation = Mat3::from(
+            base_size as f32 * FMat3::from_cols(perp1.as_vec3(), perp2.as_vec3(), dir.as_vec3()),
         );
+        let opposite_rotation = Mat3::from(
+            base_size as f32 * FMat3::from_cols(perp2.as_vec3(), perp1.as_vec3(), -dir.as_vec3()),
+        );
+        [
+            (rotation, Vec3::splat(0.5)),
+            (
+                opposite_rotation,
+                Vec3::splat(0.5) + Vec3::from(dir.as_vec3()) * base_size as f32,
+            ),
+        ]
+    });
+
+    for (rotation, offset) in transforms {
+        for level in (0..base_size.trailing_zeros()).rev() {
+            merge.dispatch(
+                [base_grid.shift(level).size(), 1, 1],
+                &level,
+                &buffer_pyramid[level as usize],
+                &buffer_pyramid[(level + 1) as usize],
+                &rotation,
+                &offset,
+            );
+        }
+        copy_final.dispatch([base_size, base_size, base_size], &rotation, &offset);
     }
 
     // let test_setup = DEVICE.create_kernel::<fn()>(&track!(|| {
@@ -175,49 +204,6 @@ fn main() {
     // }));
     // test_setup.dispatch([base_size * base_size * base_size, 1, 1]);
 
-    let trace = track!(|ray_start: Expr<Vec3<f32>>, ray_dir: Expr<Vec3<f32>>| {
-        let time = f32::INFINITY.var();
-        dda(
-            ray_start,
-            ray_dir,
-            10000.0.expr(),
-            (Vec3::splat_expr(0.01), size.expr().cast_f32() - 0.01),
-            |pos, last_t, next_t| {
-                if voxels.read(to_linear_expr(pos, Vec3::from(size))) != 255 {
-                    *time = (last_t + next_t) / 2.0;
-                    true.expr()
-                } else {
-                    false.expr()
-                }
-            },
-        );
-        **time
-    });
-
-    let draw_lines = DEVICE.create_kernel::<fn(View)>(&track!(|view| {
-        let line = lines.read(dispatch_id().x);
-        let start_pos = view.transform.inverse() * (line.start - view.pos);
-        let start_pos = start_pos / keter::max(start_pos.z, 0.01);
-        let end_pos = view.transform.inverse() * (line.end - view.pos);
-        let end_pos = end_pos / keter::max(end_pos.z, 0.01);
-        let t = dispatch_id().y.cast_f32() / dispatch_size().y.cast_f32();
-        let pos = start_pos + (end_pos - start_pos) * t;
-        let colors = [
-            Vec3::new(1.0, 0.0, 0.0),
-            Vec3::new(0.0, 1.0, 0.0),
-            Vec3::new(0.0, 0.0, 1.0),
-            Vec3::new(1.0, 1.0, 0.0),
-            Vec3::new(1.0, 0.0, 1.0),
-            Vec3::new(0.0, 1.0, 1.0),
-            Vec3::new(1.0, 1.0, 1.0),
-        ]
-        .expr();
-        let color = colors.read(line.level);
-        if pos.z > 0.0 {
-            app.set_pixel((pos.xy() + view.screen_size / 2.0).cast_i32(), color);
-        }
-    }));
-
     let draw_kernel = DEVICE.create_kernel_with_options::<fn(View, u32)>(
         KernelBuildOptions {
             name: Some("draw_kernel_4".into()),
@@ -232,6 +218,8 @@ fn main() {
             let pixel = dispatch_id().xy();
             let ray_dir = view.transform * (pixel.cast_f32() - view.screen_size / 2.0).extend(1.0);
             let ray_dir = ray_dir.normalize();
+
+            let last_pos = view.pos.floor().cast_i32().var();
 
             let hit = {
                 let time = f32::INFINITY.var();
@@ -254,6 +242,7 @@ fn main() {
                                 *time = (last_t + next_t) / 2.0;
                                 true.expr()
                             } else {
+                                *last_pos = pos.cast_i32();
                                 false.expr()
                             }
                         }
@@ -265,26 +254,17 @@ fn main() {
             if hit != f32::INFINITY {
                 let world_pos = view.pos + ray_dir * hit;
                 let world_voxel = world_pos.floor().cast_i32();
-                let delta_dist = (1.0 / ray_dir).abs();
-                let side_dist = ((-ray_dir).signum() * (world_voxel.cast_f32() - world_pos)
-                    + (-ray_dir).signum() * 0.5
-                    + 0.5)
-                    * delta_dist;
-                let mask = side_dist <= keter::min(side_dist.yzx(), side_dist.zxy());
-                let normal = -mask.select(ray_dir.signum().cast_i32(), Vec3::splat_expr(0));
-                let prev_voxel = if slice == 0 {
-                    world_voxel + normal
-                } else {
-                    world_voxel
-                };
-                let lighting = BufferStorage {
-                    axes,
-                    buffer: buffer_pyramid[0].var(),
-                }
-                .load(
-                    base_grid.expr(),
-                    Probe::expr(prev_voxel, Vec2::splat_expr(0)),
-                ) + 0.01;
+                let prev_voxel = if slice == 0 { **last_pos } else { world_voxel };
+
+                let radiance =
+                    if (prev_voxel < 0).any() || (prev_voxel >= size.expr().cast_i32()).any() {
+                        0.0_f32.expr()
+                    } else {
+                        final_radiance.read(to_linear_expr(
+                            prev_voxel.clamp(0, size.expr().cast_i32() - 1).cast_u32(),
+                            size,
+                        ))
+                    } + 0.01;
 
                 let color = voxels.read(to_linear_expr(world_voxel.cast_u32(), Vec3::from(size)));
                 // Vec3::splat_expr(num_ddas.cast_f32() * 0.1); // pcg3df(Vec3::expr(hit.inst, hit.prim, 1));
@@ -292,9 +272,9 @@ fn main() {
                 app.set_pixel(
                     pixel.cast_i32(),
                     if (color != Vec3::splat(0.0)).any() {
-                        color * lighting
+                        color * radiance
                     } else {
-                        Vec3::splat_expr(lighting)
+                        Vec3::splat_expr(radiance)
                     },
                 );
             }
@@ -308,8 +288,6 @@ fn main() {
         pos: Vec3::new(-30.0, -30.0, 60.0),
         fov: 1.15,
     };
-
-    println!("Lines: {:?}", &lines.copy_to_vec()[0..5]);
 
     let mut slice: u32 = 0;
 
@@ -346,15 +324,6 @@ fn main() {
         }
 
         rt.log_fps();
-
-        for level in (0..base_size.trailing_zeros()).rev() {
-            merge.dispatch(
-                [base_grid.shift(level).size(), 1, 1],
-                &level,
-                &buffer_pyramid[level as usize],
-                &buffer_pyramid[(level + 1) as usize],
-            );
-        }
 
         draw_kernel.dispatch(rt.dispatch_size(), &camera.view(), &slice);
         // draw_lines.dispatch([lines.len() as u32, 256, 1], &camera.view());

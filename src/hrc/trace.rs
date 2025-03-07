@@ -6,8 +6,7 @@ use keter::prelude::*;
 use super::color::{Color, ColorType, ToFluence};
 use super::fluence::{Fluence, FluenceType, Radiance};
 use super::{Grid, Probe, quads};
-use crate::utils::{HIT_STATE, TOTAL_MISS_STATE, dda, to_linear_expr};
-use crate::{Line, LineComps};
+use crate::utils::{HIT_STATE, LEAVE_STATE, dda, to_linear_expr};
 
 pub trait Tracer<F: FluenceType> {
     /// Traces the upper and lower frustrums for a given probe.
@@ -30,19 +29,31 @@ pub trait WorldTracer<F: FluenceType> {
     }
 }
 
+impl<F: FluenceType, T: WorldTracer<F>> WorldTracer<F> for &T {
+    fn trace(
+        &self,
+        start: Expr<Vec3<f32>>,
+        direction: Expr<Vec3<f32>>,
+        length: Expr<f32>,
+    ) -> Expr<Fluence<F>> {
+        T::trace(*self, start, direction, length)
+    }
+    fn trace_to(&self, start: Expr<Vec3<f32>>, end: Expr<Vec3<f32>>) -> Expr<Fluence<F>> {
+        T::trace_to(*self, start, end)
+    }
+}
+
 pub struct WorldMapper<F: FluenceType, T> {
     pub tracer: T,
-    pub lines: BufferView<Line>,
-    pub line_count: Singleton<u32>,
-    pub rotation: Mat3,
-    pub offset: Vec3<f32>,
+    pub rotation: Expr<Mat3>,
+    pub offset: Expr<Vec3<f32>>,
     pub _marker: PhantomData<F>,
 }
 impl<F: FluenceType, T> WorldMapper<F, T> {
     #[tracked]
     pub fn to_world(&self, grid: Expr<Grid>, cell: Expr<Vec3<i32>>) -> Expr<Vec3<f32>> {
         let pos_norm = cell.cast_f32() / grid.size.cast_f32();
-        self.rotation.expr() * pos_norm + self.offset
+        self.rotation * pos_norm + self.offset
     }
 }
 
@@ -71,19 +82,6 @@ impl<F: FluenceType, T: WorldTracer<F>> Tracer<F> for WorldMapper<F, T> {
                     .extend(1)
                     * factor,
             );
-            // if (probe.cell == Vec3::new(0, 0, 1)).all() {
-            //     let index = self.line_count.atomic().fetch_add(1);
-            //     if index < self.lines.len_expr_u32() {
-            //         self.lines.write(
-            //             index,
-            //             Line::from_comps_expr(LineComps {
-            //                 start,
-            //                 end,
-            //                 level: grid.directions.cast_f32().log2().cast_u32(),
-            //             }),
-            //         );
-            //     }
-            // }
             self.tracer.trace_to(start, end).restrict_angle(sizes[i])
         })
     }
@@ -123,15 +121,13 @@ where
                 if value != 255 {
                     let color = self.palette.read(value.cast_u32());
                     *fluence = fluence.over(color.to_fluence(segment_size));
-                    // true.expr()
                 }
                 false.expr()
             },
         );
-        // if state & TOTAL_MISS_STATE != 0 && state & HIT_STATE == 0 {
-        //     *fluence = Fluence::<F>::solid(F::Radiance::debug_white()).expr();
-        // }
-        // Fluence::<F>::solid(F::Radiance::debug_white()).expr()
+        if state & LEAVE_STATE != 0 && state & HIT_STATE == 0 {
+            *fluence = fluence.over(Fluence::solid(F::Radiance::debug_white()).expr());
+        }
         **fluence
     }
 }

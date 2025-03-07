@@ -27,8 +27,8 @@ impl<R: Radiance> RadianceStorage<R> for BufferStorage<R> {
         } else {
             self.buffer.read(Axis::join(
                 self.axes,
-                (cell, probe.dir),
                 (grid.size, Vec2::splat_expr(grid.directions)),
+                (cell, probe.dir),
             ))
         }
     }
@@ -39,8 +39,8 @@ impl<R: Radiance> RadianceStorage<R> for BufferStorage<R> {
         self.buffer.write(
             Axis::join(
                 self.axes,
-                (cell, probe.dir),
                 (grid.size, Vec2::splat_expr(grid.directions)),
+                (cell, probe.dir),
             ),
             radiance,
         );

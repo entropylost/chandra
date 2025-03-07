@@ -1,13 +1,13 @@
 use fluence::{FluenceType, Radiance};
-use keter::lang::types::vector::{Vec2, Vec3, VectorAlign};
+use keter::lang::types::vector::{Vec2, Vec3};
 use keter::prelude::*;
 use storage::RadianceStorage;
 use trace::Tracer;
 
-mod color;
-mod fluence;
-mod storage;
-mod trace;
+pub mod color;
+pub mod fluence;
+pub mod storage;
+pub mod trace;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Axis {
@@ -76,6 +76,15 @@ pub struct Grid {
 impl Grid {
     pub fn new(size: Vec3<u32>, directions: u32) -> Grid {
         Grid { size, directions }
+    }
+    pub fn shift(&self, n: u32) -> Grid {
+        Grid {
+            size: Vec3::new(self.size.x, self.size.y, self.size.z >> n),
+            directions: self.directions << n,
+        }
+    }
+    pub fn size(&self) -> u32 {
+        self.size.x * self.size.y * self.size.z * self.directions * self.directions
     }
     #[tracked]
     pub fn expr(size: Expr<Vec3<u32>>, directions: Expr<u32>) -> Expr<Grid> {

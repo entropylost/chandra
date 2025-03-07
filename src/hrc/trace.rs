@@ -82,8 +82,8 @@ where
     C::Emission: IoTexel,
     C::Opacity: IoTexel,
 {
-    palette: BufferView<Color<C>>,
-    buffer: BufferView<u8>,
+    pub palette: BufferView<Color<C>>,
+    pub buffer: BufferView<u8>,
     pub size: Vec3<u32>,
 }
 impl<C: ColorType, F: FluenceType> WorldTracer<F> for VoxelTracer<C>
@@ -104,7 +104,7 @@ where
             start,
             direction,
             length,
-            (Vec3::splat_expr(0.001), self.size.expr().cast_f32() - 0.001),
+            (Vec3::splat_expr(0.01), self.size.expr().cast_f32() - 0.01),
             |pos, last_t, next_t| {
                 let segment_size = next_t - last_t;
                 let value = self.buffer.read(to_linear_expr(pos, self.size));

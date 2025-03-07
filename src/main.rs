@@ -1,3 +1,5 @@
+use std::f32::consts::PI;
+
 use glam::{Mat3 as FMat3, UVec3};
 use hrc::storage::{BufferStorage, RadianceStorage};
 use hrc::trace::{VoxelTracer, WorldMapper};
@@ -58,7 +60,7 @@ type Fluence = hrc::fluence::Fluence<hrc::fluence::BinaryF32>;
 fn main() {
     let app = App::new("Sunfall", [2048; 2]).agx().resize().init();
 
-    let file = dot_vox::load("assets/monu10-c.vox").unwrap();
+    let file = dot_vox::load("assets/test.vox").unwrap();
 
     let palette = DEVICE.create_buffer_from_fn(file.palette.len(), |i| {
         let color = file.palette[i];
@@ -68,7 +70,7 @@ fn main() {
         if i == 0 {
             Color::solid(1.0_f32)
         } else {
-            Color::empty()
+            Color::solid(1.0_f32)
         }
     });
 
@@ -134,22 +136,31 @@ fn main() {
         }
     ));
 
-    let test_setup = DEVICE.create_kernel::<fn()>(&track!(|| {
-        let grid = base_grid.expr();
-        let probe = Axis::extract(
-            axes,
-            (grid.size, Vec2::splat_expr(grid.directions)),
-            dispatch_id().x,
+    for level in (0..base_size.trailing_zeros()).rev() {
+        merge.dispatch(
+            [base_grid.shift(level).size(), 1, 1],
+            &level,
+            &buffer_pyramid[level as usize],
+            &buffer_pyramid[(level + 1) as usize],
         );
-        let probe = Probe::expr(probe.0.cast_i32(), probe.1);
+    }
 
-        BufferStorage {
-            axes,
-            buffer: buffer_pyramid[0].var(),
-        }
-        .store(grid, probe, 1.0.expr());
-    }));
-    test_setup.dispatch([base_size * base_size * base_size, 1, 1]);
+    // let test_setup = DEVICE.create_kernel::<fn()>(&track!(|| {
+    //     let grid = base_grid.expr();
+    //     let probe = Axis::extract(
+    //         axes,
+    //         (grid.size, Vec2::splat_expr(grid.directions)),
+    //         dispatch_id().x,
+    //     );
+    //     let probe = Probe::expr(probe.0.cast_i32(), probe.1);
+    //
+    //     BufferStorage {
+    //         axes,
+    //         buffer: buffer_pyramid[0].var(),
+    //     }
+    //     .store(grid, probe, 1.0.expr());
+    // }));
+    // test_setup.dispatch([base_size * base_size * base_size, 1, 1]);
 
     let trace = track!(|ray_start: Expr<Vec3<f32>>, ray_dir: Expr<Vec3<f32>>| {
         let time = f32::INFINITY.var();
@@ -204,8 +215,8 @@ fn main() {
                 }
                 .load(
                     base_grid.expr(),
-                    Probe::expr(world_voxel, Vec2::splat_expr(0)),
-                ) + 0.1;
+                    Probe::expr(prev_voxel, Vec2::splat_expr(0)),
+                ) + 0.01;
                 // trace(
                 //     prev_voxel.cast_f32() + 0.5,
                 //     Vec3::<f32>::expr(0.3, 0.2, 1.0).normalize(),

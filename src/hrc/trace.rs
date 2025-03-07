@@ -4,7 +4,7 @@ use keter::lang::types::vector::{Mat3, Vec3};
 use keter::prelude::*;
 
 use super::color::{Color, ColorType, ToFluence};
-use super::fluence::{Fluence, FluenceType};
+use super::fluence::{Fluence, FluenceType, Radiance};
 use super::{Grid, Probe, quads};
 use crate::utils::{dda, to_linear_expr};
 
@@ -115,6 +115,7 @@ where
                 false.expr()
             },
         );
+        // Fluence::<F>::solid(F::Radiance::debug_white()).expr()
         **fluence
     }
 }

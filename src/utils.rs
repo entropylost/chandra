@@ -16,6 +16,10 @@ pub fn aabb_intersect(
     Vec2::expr(tmin, tmax)
 }
 
+pub const TOTAL_MISS_STATE: u32 = 0b100;
+pub const LEAVE_STATE: u32 = 0b10;
+pub const HIT_STATE: u32 = 0b1;
+
 #[tracked]
 pub fn dda(
     start: Expr<Vec3<f32>>,
@@ -23,12 +27,16 @@ pub fn dda(
     length: Expr<f32>,
     bounds: (Expr<Vec3<f32>>, Expr<Vec3<f32>>),
     f: impl Fn(Expr<Vec3<u32>>, Expr<f32>, Expr<f32>) -> Expr<bool>,
-) {
+) -> Expr<u32> {
     let inv_dir = (ray_dir + f32::EPSILON).recip();
     let interval = aabb_intersect(start, inv_dir, bounds.0, bounds.1);
     let start_t = keter::max(interval.x, 0.0);
     let ray_start = start + start_t * ray_dir;
     let end_t = keter::min(interval.y, length);
+    let state = 0_u32.var();
+    if interval.y < length {
+        *state |= LEAVE_STATE;
+    }
     if end_t - start_t >= 0.01 {
         let pos = ray_start.floor().cast_i32().cast_u32().var();
 
@@ -47,6 +55,7 @@ pub fn dda(
             let next_t = side_dist.reduce_min() + start_t;
 
             if f(**pos, **last_t, keter::min(next_t, end_t)) {
+                *state |= HIT_STATE;
                 break;
             }
             if next_t >= end_t {
@@ -58,7 +67,10 @@ pub fn dda(
             *side_dist += mask.select(delta_dist, Vec3::splat_expr(0.0));
             *pos += mask.select(ray_step, Vec3::splat_expr(0));
         }
+    } else {
+        *state |= TOTAL_MISS_STATE;
     }
+    **state
 }
 
 // https://github.com/markjarzynski/PCG3D/blob/master/pcg3d.hlsl

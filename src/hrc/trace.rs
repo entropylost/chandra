@@ -6,7 +6,8 @@ use keter::prelude::*;
 use super::color::{Color, ColorType, ToFluence};
 use super::fluence::{Fluence, FluenceType, Radiance};
 use super::{Grid, Probe, quads};
-use crate::utils::{dda, to_linear_expr};
+use crate::utils::{HIT_STATE, TOTAL_MISS_STATE, dda, to_linear_expr};
+use crate::{Line, LineComps};
 
 pub trait Tracer<F: FluenceType> {
     /// Traces the upper and lower frustrums for a given probe.
@@ -31,6 +32,8 @@ pub trait WorldTracer<F: FluenceType> {
 
 pub struct WorldMapper<F: FluenceType, T> {
     pub tracer: T,
+    pub lines: BufferView<Line>,
+    pub line_count: Singleton<u32>,
     pub rotation: Mat3,
     pub offset: Vec3<f32>,
     pub _marker: PhantomData<F>,
@@ -57,22 +60,31 @@ impl<F: FluenceType, T: WorldTracer<F>> Tracer<F> for WorldMapper<F, T> {
         let lower_offset = grid.lower_offset(dir);
         let upper_offset = grid.upper_offset(dir);
 
-        let factor = (cell.x % 2 == 0).select(2_i32.expr(), 1_i32.expr());
+        let factor = (cell.z % 2 == 0).select(2_i32.expr(), 1_i32.expr());
 
         [0, 1, 2, 3].map(|i| {
-            self.tracer
-                .trace_to(
-                    start,
-                    self.to_world(
-                        grid,
-                        cell + quads()[i]
-                            .expr()
-                            .select(lower_offset, upper_offset)
-                            .extend(1)
-                            * factor,
-                    ),
-                )
-                .restrict_angle(sizes[i])
+            let end = self.to_world(
+                grid,
+                cell + quads()[i]
+                    .expr()
+                    .select(lower_offset, upper_offset)
+                    .extend(1)
+                    * factor,
+            );
+            // if (probe.cell == Vec3::new(0, 0, 1)).all() {
+            //     let index = self.line_count.atomic().fetch_add(1);
+            //     if index < self.lines.len_expr_u32() {
+            //         self.lines.write(
+            //             index,
+            //             Line::from_comps_expr(LineComps {
+            //                 start,
+            //                 end,
+            //                 level: grid.directions.cast_f32().log2().cast_u32(),
+            //             }),
+            //         );
+            //     }
+            // }
+            self.tracer.trace_to(start, end).restrict_angle(sizes[i])
         })
     }
 }
@@ -100,7 +112,7 @@ where
         length: Expr<f32>,
     ) -> Expr<Fluence<F>> {
         let fluence = Fluence::<F>::empty().var();
-        dda(
+        let state = dda(
             start,
             direction,
             length,
@@ -111,10 +123,14 @@ where
                 if value != 255 {
                     let color = self.palette.read(value.cast_u32());
                     *fluence = fluence.over(color.to_fluence(segment_size));
+                    // true.expr()
                 }
                 false.expr()
             },
         );
+        // if state & TOTAL_MISS_STATE != 0 && state & HIT_STATE == 0 {
+        //     *fluence = Fluence::<F>::solid(F::Radiance::debug_white()).expr();
+        // }
         // Fluence::<F>::solid(F::Radiance::debug_white()).expr()
         **fluence
     }

@@ -196,7 +196,7 @@ impl ToFluence<fluence::BinaryF32> for BinaryF32 {
         color: Expr<Color<Self>>,
         segment_length: Expr<f32>,
     ) -> Expr<Fluence<fluence::BinaryF32>> {
-        if segment_length < 0.01 {
+        if segment_length < 0.0001 {
             Fluence::empty().expr()
         } else {
             Fluence::expr(

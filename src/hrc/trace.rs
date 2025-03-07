@@ -126,7 +126,7 @@ where
             },
         );
         if state & LEAVE_STATE != 0 && state & HIT_STATE == 0 {
-            *fluence = fluence.over(Fluence::solid(F::Radiance::debug_white()).expr());
+            *fluence = fluence.over(Fluence::solid(F::Radiance::black()).expr());
         }
         **fluence
     }

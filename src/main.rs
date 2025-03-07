@@ -58,7 +58,7 @@ type Fluence = hrc::fluence::Fluence<hrc::fluence::BinaryF32>;
 fn main() {
     let app = App::new("Sunfall", [2048; 2]).agx().resize().init();
 
-    let file = dot_vox::load("assets/test.vox").unwrap();
+    let file = dot_vox::load("assets/test2.vox").unwrap();
 
     let palette = DEVICE.create_buffer_from_fn(file.palette.len(), |i| {
         let color = file.palette[i];
@@ -73,7 +73,8 @@ fn main() {
     });
 
     let model = &file.models[0];
-    let size = UVec3::new(64, 64, 64);
+    let base_size = 128_u32;
+    let size = UVec3::splat(base_size);
 
     let mut voxels = vec![255; size.element_product() as usize];
     for voxel in &model.voxels {
@@ -87,7 +88,6 @@ fn main() {
 
     let size = Vec3::from(size);
 
-    let base_size = 64_u32;
     let base_grid = Grid::new(Vec3::splat(base_size), 1);
     // Don't actually need the =, again.
     let buffer_pyramid = (0..=base_size.trailing_zeros())
@@ -139,8 +139,12 @@ fn main() {
             BufferStorage { axes, buffer }.store(grid, probe, radiance);
         }),
     );
+    println!("Size: {:?}", size);
     let copy_final = DEVICE.create_kernel::<fn(Mat3, Vec3<f32>)>(&track!(|rotation, offset| {
-        let probe = Probe::expr(dispatch_id().cast_i32(), Vec2::splat_expr(0));
+        let probe = Probe::expr(
+            dispatch_id().cast_i32() + Vec3::new(0, 0, 1),
+            Vec2::splat_expr(0),
+        );
         let radiance = BufferStorage {
             axes,
             buffer: buffer_pyramid[0].var(),
@@ -168,14 +172,17 @@ fn main() {
             (rotation, Vec3::splat(0.5)),
             (
                 opposite_rotation,
-                Vec3::splat(0.5) + Vec3::from(dir.as_vec3()) * base_size as f32,
+                Vec3::splat(0.5) + Vec3::from(dir.as_vec3()) * (base_size as f32 - 1.0),
             ),
         ]
     });
 
+    let start = std::time::Instant::now();
+
     for (rotation, offset) in transforms {
         for level in (0..base_size.trailing_zeros()).rev() {
-            merge.dispatch(
+            println!("loading: {:?}", level);
+            merge.dispatch_blocking(
                 [base_grid.shift(level).size(), 1, 1],
                 &level,
                 &buffer_pyramid[level as usize],
@@ -184,29 +191,14 @@ fn main() {
                 &offset,
             );
         }
-        copy_final.dispatch([base_size, base_size, base_size], &rotation, &offset);
+        println!("Copying final");
+        copy_final.dispatch_blocking([base_size, base_size, base_size], &rotation, &offset);
     }
 
-    // let test_setup = DEVICE.create_kernel::<fn()>(&track!(|| {
-    //     let grid = base_grid.expr();
-    //     let probe = Axis::extract(
-    //         axes,
-    //         (grid.size, Vec2::splat_expr(grid.directions)),
-    //         dispatch_id().x,
-    //     );
-    //     let probe = Probe::expr(probe.0.cast_i32(), probe.1);
-    //
-    //     BufferStorage {
-    //         axes,
-    //         buffer: buffer_pyramid[0].var(),
-    //     }
-    //     .store(grid, probe, 1.0.expr());
-    // }));
-    // test_setup.dispatch([base_size * base_size * base_size, 1, 1]);
+    println!("Time: {:?}", start.elapsed());
 
     let draw_kernel = DEVICE.create_kernel_with_options::<fn(View, u32)>(
         KernelBuildOptions {
-            name: Some("draw_kernel_4".into()),
             enable_debug_info: true,
             enable_optimization: true,
             enable_cache: true,

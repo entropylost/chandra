@@ -1,6 +1,6 @@
 use glam::{Mat3 as FMat3, UVec3};
 use hrc::storage::{BufferStorage, RadianceStorage};
-use hrc::trace::{StorageTracer, VoxelTracer, WorldMapper, merge_up};
+use hrc::trace::{StorageTracer, Tracer, VoxelTracer, WorldMapper, merge_up};
 use hrc::{Axis, Grid, Probe};
 use keter::lang::types::vector::{Mat3, Vec2, Vec3};
 use keter::prelude::*;
@@ -169,6 +169,7 @@ fn main() {
         .create_kernel::<fn(u32, Buffer<Fluence>, Buffer<Fluence>, Buffer<f32>, Buffer<f32>)>(
             &track!(|level, ray_buffer, next_ray_buffer, buffer, next_buffer| {
                 let grid = base_grid.expr().shift(level);
+
                 let tracer = StorageTracer {
                     axes,
                     grid,
@@ -176,18 +177,20 @@ fn main() {
                     next_buffer: next_ray_buffer,
                 };
 
-                let probe = Axis::extract(
+                let (cell, dir) = Axis::extract(
                     axes,
                     (grid.size, Vec2::splat_expr(grid.directions)),
                     dispatch_id().x,
                 );
-                let probe = Probe::expr(probe.0.cast_i32(), probe.1);
+                let probe = Probe::expr(cell.cast_i32(), dir);
+                let trace = tracer.trace(probe);
+
                 let storage = BufferStorage {
                     axes,
                     grid: grid.next(),
                     buffer: next_buffer,
                 };
-                let radiance = hrc::merge(grid, probe, &storage, &tracer);
+                let radiance = hrc::merge(grid, probe, trace, &storage);
                 BufferStorage { axes, grid, buffer }.store(probe, radiance);
             }),
         );
@@ -236,7 +239,7 @@ fn main() {
             println!("Storing: {:?}", level);
             let mut grid = base_grid.shift(level);
             grid.directions += 1;
-            if true {
+            if level < 3 {
                 store.dispatch_blocking(
                     [grid.size(), 1, 1],
                     &level,

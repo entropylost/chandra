@@ -1,4 +1,4 @@
-use fluence::{FluenceType, Radiance};
+use fluence::{Fluence, FluenceType, Radiance};
 use keter::lang::types::vector::{Vec2, Vec3};
 use keter::prelude::*;
 use storage::RadianceStorage;
@@ -183,11 +183,11 @@ fn quads() -> [Vec2<bool>; 4] {
 }
 
 #[tracked]
-pub fn merge<F: FluenceType, S: RadianceStorage<F::Radiance>, T: Tracer<F>>(
+pub fn merge<F: FluenceType, S: RadianceStorage<F::Radiance>>(
     grid: Expr<Grid>,
     probe: Expr<Probe>,
+    trace: [Expr<Fluence<F>>; 4],
     storage: &S,
-    tracer: &T,
 ) -> Expr<F::Radiance> {
     let load_next = |probe: Expr<Probe>| storage.load(probe.next());
 
@@ -201,18 +201,16 @@ pub fn merge<F: FluenceType, S: RadianceStorage<F::Radiance>, T: Tracer<F>>(
 
     let factor = (cell.z % 2 == 0).select(2_i32.expr(), 1_i32.expr());
 
-    let trace = tracer.trace(probe);
-
     let next = [0, 1, 2, 3].map(|i| {
         F::over_radiance(
             trace[i],
             load_next(Probe::expr(
                 cell + quads()[i]
                     .expr()
-                    .select(lower_offset, upper_offset)
+                    .select(upper_offset, lower_offset)
                     .extend(1)
                     * factor,
-                quads()[i].expr().select(lower_dir, upper_dir),
+                quads()[i].expr().select(upper_dir, lower_dir),
             )),
         )
     });
@@ -222,7 +220,7 @@ pub fn merge<F: FluenceType, S: RadianceStorage<F::Radiance>, T: Tracer<F>>(
             F::Radiance::blend(
                 load_next(Probe::expr(
                     cell,
-                    quads()[i].expr().select(lower_dir, upper_dir),
+                    quads()[i].expr().select(upper_dir, lower_dir),
                 )),
                 next[i],
             )

@@ -89,7 +89,7 @@ impl<F: FluenceType, T: WorldTracer<F>> Tracer<F> for WorldMapper<F, T> {
             let end = self.to_world(
                 cell + quads()[i]
                     .expr()
-                    .select(lower_offset, upper_offset)
+                    .select(upper_offset, lower_offset)
                     .extend(1)
                     * factor,
             );
@@ -237,19 +237,12 @@ where
     let cell = Vec3::expr(next_cell.x, next_cell.y, next_cell.z * 2);
     let offset = next_grid.ray_offset(next_dir);
     Fluence::blend_n(&quads().map(|quad| {
-        let mid_offset = offset.cast_f32() / 2.0;
-        let dir = next_dir / 2 + quad.expr().cast_u32();
+        let odd = next_dir % 2;
+        let mid_offset = offset / 2;
+        let dir = next_dir / 2 + odd * quad.expr().cast_u32();
         let midpoint = Probe::expr(
-            cell + quad
-                .expr()
-                .select(
-                    // TODO: Can make this more efficient.
-                    (mid_offset / 2.0).ceil() * 2.0,
-                    (mid_offset / 2.0).floor() * 2.0,
-                )
-                .cast_i32()
-                .extend(1),
-            next_dir / 2 + 1 - quad.expr().cast_u32(),
+            cell + (mid_offset + odd.cast_i32() * (2 * quad.expr().cast_i32() - 1)).extend(1),
+            next_dir / 2 + odd * (1 - quad.expr().cast_u32()),
         );
         F::over(
             storage.load(Probe::expr(cell, dir)),

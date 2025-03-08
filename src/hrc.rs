@@ -94,6 +94,13 @@ impl Grid {
 
 impl GridExpr {
     #[tracked]
+    pub fn shift(self, n: Expr<u32>) -> Expr<Grid> {
+        Grid::expr(
+            Vec3::expr(self.size.x, self.size.y, self.size.z >> n),
+            self.directions << n,
+        )
+    }
+    #[tracked]
     pub fn next(self) -> Expr<Grid> {
         Grid::expr(
             Vec3::expr(self.size.x, self.size.y, self.size.z / 2),
@@ -182,8 +189,7 @@ pub fn merge<F: FluenceType, S: RadianceStorage<F::Radiance>, T: Tracer<F>>(
     storage: &S,
     tracer: &T,
 ) -> Expr<F::Radiance> {
-    let next_grid = grid.next();
-    let load_next = |probe: Expr<Probe>| storage.load(next_grid, probe.next());
+    let load_next = |probe: Expr<Probe>| storage.load(probe.next());
 
     let cell = probe.cell;
     let dir = probe.dir;
@@ -195,7 +201,7 @@ pub fn merge<F: FluenceType, S: RadianceStorage<F::Radiance>, T: Tracer<F>>(
 
     let factor = (cell.z % 2 == 0).select(2_i32.expr(), 1_i32.expr());
 
-    let trace = tracer.trace(grid, probe);
+    let trace = tracer.trace(probe);
 
     let next = [0, 1, 2, 3].map(|i| {
         F::over_radiance(

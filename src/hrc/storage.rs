@@ -9,37 +9,38 @@ use super::{Axis, Grid, Probe};
 // Construct from kernel arg somehow.
 // Then later there's like a Pyraimd::construct_storages() and then Pyramid[level] passin.
 pub trait RadianceStorage<R: Radiance> {
-    fn load(&self, grid: Expr<Grid>, probe: Expr<Probe>) -> Expr<R>;
-    fn store(&self, grid: Expr<Grid>, probe: Expr<Probe>, radiance: Expr<R>);
+    fn load(&self, probe: Expr<Probe>) -> Expr<R>;
+    fn store(&self, probe: Expr<Probe>, radiance: Expr<R>);
 }
 
 pub struct BufferStorage<R: Radiance> {
     pub axes: [Axis; 5],
+    pub grid: Expr<Grid>,
     pub buffer: BufferVar<R>,
 }
 
 impl<R: Radiance> RadianceStorage<R> for BufferStorage<R> {
     #[tracked]
-    fn load(&self, grid: Expr<Grid>, probe: Expr<Probe>) -> Expr<R> {
+    fn load(&self, probe: Expr<Probe>) -> Expr<R> {
         let cell = probe.cell.cast_u32();
-        if (cell >= grid.size).any() {
+        if (cell >= self.grid.size).any() {
             R::black().expr()
         } else {
             self.buffer.read(Axis::join(
                 self.axes,
-                (grid.size, Vec2::splat_expr(grid.directions)),
+                (self.grid.size, Vec2::splat_expr(self.grid.directions)),
                 (cell, probe.dir),
             ))
         }
     }
     #[tracked]
-    fn store(&self, grid: Expr<Grid>, probe: Expr<Probe>, radiance: Expr<R>) {
+    fn store(&self, probe: Expr<Probe>, radiance: Expr<R>) {
         let cell = probe.cell.cast_u32();
 
         self.buffer.write(
             Axis::join(
                 self.axes,
-                (grid.size, Vec2::splat_expr(grid.directions)),
+                (self.grid.size, Vec2::splat_expr(self.grid.directions)),
                 (cell, probe.dir),
             ),
             radiance,

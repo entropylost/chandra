@@ -114,17 +114,15 @@ fn main() {
 
     let merge = DEVICE.create_kernel::<fn(u32, Buffer<f32>, Buffer<f32>, Mat3, Vec3<f32>)>(
         &track!(|level, buffer, next_buffer, rotation, offset| {
+            let grid = base_grid.expr().shift(level);
             let tracer = WorldMapper::<hrc::fluence::BinaryF32, _> {
                 tracer: &voxel_tracer,
+                grid,
                 rotation,
                 offset,
                 _marker: Default::default(),
             };
 
-            let grid = Grid::expr(
-                Vec3::expr(base_size, base_size, base_size >> level),
-                1 << level,
-            );
             let probe = Axis::extract(
                 axes,
                 (grid.size, Vec2::splat_expr(grid.directions)),
@@ -133,10 +131,11 @@ fn main() {
             let probe = Probe::expr(probe.0.cast_i32(), probe.1);
             let storage = BufferStorage {
                 axes,
+                grid: grid.next(),
                 buffer: next_buffer,
             };
             let radiance = hrc::merge(grid, probe, &storage, &tracer);
-            BufferStorage { axes, buffer }.store(grid, probe, radiance);
+            BufferStorage { axes, grid, buffer }.store(probe, radiance);
         }),
     );
     println!("Size: {:?}", size);
@@ -147,9 +146,10 @@ fn main() {
         );
         let radiance = BufferStorage {
             axes,
+            grid: base_grid.expr(),
             buffer: buffer_pyramid[0].var(),
         }
-        .load(base_grid.expr(), probe);
+        .load(probe);
         let pos_norm = dispatch_id().cast_f32() / base_size as f32;
         let pos = rotation * pos_norm + offset;
         let pos = pos.cast_u32();

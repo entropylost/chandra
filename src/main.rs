@@ -287,6 +287,8 @@ fn main() {
 
             let last_pos = view.pos.floor().cast_i32().var();
 
+            let ambient = Fluence::empty().var();
+
             let hit = {
                 let time = f32::INFINITY.var();
                 dda(
@@ -295,22 +297,24 @@ fn main() {
                     10000.0.expr(),
                     (Vec3::splat_expr(0.01), size.expr().cast_f32() - 0.01),
                     |pos, last_t, next_t| {
-                        if slice != 0 {
-                            if pos.y == slice {
-                                *time = (last_t + next_t) / 2.0;
-
-                                true.expr()
-                            } else {
-                                false.expr()
-                            }
+                        if (slice != 0 && pos.y == slice)
+                            || (slice == 0
+                                && voxels.read(to_linear_expr(pos, Vec3::from(size))) != 255)
+                        {
+                            *time = (last_t + next_t) / 2.0;
+                            true.expr()
                         } else {
-                            if voxels.read(to_linear_expr(pos, Vec3::from(size))) != 255 {
-                                *time = (last_t + next_t) / 2.0;
-                                true.expr()
-                            } else {
-                                *last_pos = pos.cast_i32();
-                                false.expr()
-                            }
+                            let segment_size = next_t - last_t;
+                            let radiance = final_radiance.read(to_linear_expr(pos, size));
+                            *ambient = ambient.over(
+                                hrc::color::Color::<hrc::color::SingleF32>::expr(
+                                    radiance,
+                                    0.001.expr(),
+                                )
+                                .to_fluence(segment_size),
+                            );
+                            *last_pos = pos.cast_i32();
+                            false.expr()
                         }
                     },
                 );
@@ -338,11 +342,13 @@ fn main() {
                 app.set_pixel(
                     pixel.cast_i32(),
                     if (color != Vec3::splat(0.0)).any() {
-                        color * radiance
+                        ambient.radiance + ambient.transmittance * color * radiance
                     } else {
                         Vec3::splat_expr(radiance)
                     },
                 );
+            } else {
+                app.set_pixel(pixel.cast_i32(), Vec3::splat_expr(ambient.radiance));
             }
         }),
     );

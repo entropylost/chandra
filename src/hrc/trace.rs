@@ -1,11 +1,11 @@
 use std::marker::PhantomData;
 
-use keter::lang::types::vector::{Mat3, Vec3};
+use keter::lang::types::vector::{Mat3, Vec2, Vec3};
 use keter::prelude::*;
 
 use super::color::{Color, ColorType, ToFluence};
-use super::fluence::{Fluence, FluenceType, Radiance};
-use super::{Grid, Probe, quads};
+use super::fluence::{Fluence, FluenceType, PartialTransmittance, Radiance};
+use super::{Axis, Grid, Probe, quads};
 use crate::utils::{HIT_STATE, LEAVE_STATE, dda, to_linear_expr};
 
 pub trait Tracer<F: FluenceType> {
@@ -55,6 +55,17 @@ impl<F: FluenceType, T> WorldMapper<F, T> {
     pub fn to_world(&self, cell: Expr<Vec3<i32>>) -> Expr<Vec3<f32>> {
         let pos_norm = cell.cast_f32() / self.grid.size.cast_f32();
         self.rotation * pos_norm + self.offset
+    }
+    #[tracked]
+    #[tracked]
+    pub fn compute_ray(&self, probe: Expr<Probe>) -> Expr<Fluence<F>>
+    where
+        T: WorldTracer<F>,
+    {
+        let start = self.to_world(probe.cell);
+        let end_cell = probe.cell + self.grid.ray_offset(probe.dir).extend(1);
+        let end = self.to_world(end_cell);
+        self.tracer.trace_to(start, end)
     }
 }
 
@@ -132,98 +143,80 @@ where
     }
 }
 
-/*
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct StorageTracer {
+#[derive(Clone)]
+pub struct StorageTracer<F: FluenceType> {
     pub axes: [Axis; 5],
+    pub grid: Expr<Grid>,
     pub buffer: BufferVar<Fluence<F>>,
     pub next_buffer: BufferVar<Fluence<F>>,
 }
-impl StorageTracer {
+impl<F: FluenceType> StorageTracer<F> {
     #[tracked]
-    pub fn load<F: FluenceType>(
-        &self,
-        buffer: &BufferVar<Fluence<F>>,
-        grid: Expr<Grid>,
-        probe: Expr<Probe>,
-    ) -> Expr<Fluence<F>> {
+    pub fn load(&self, probe: Expr<Probe>) -> Expr<Fluence<F>> {
         let cell = probe.cell.cast_u32();
-        buffer.read(Axis::join(
+        self.buffer.read(Axis::join(
             self.axes,
+            (self.grid.size, Vec2::splat_expr(self.grid.directions + 1)),
             (cell, probe.dir),
-            (grid.size, grid.directions + 1),
         ))
     }
     #[tracked]
-    pub fn load_opt<F: FluenceType>(
-        &self,
-
-        buffer: &BufferVar<Fluence<F>>,
-        grid: Expr<Grid>,
-        probe: Expr<Probe>,
-    ) -> Expr<Fluence<F>> {
+    pub fn load_next(&self, probe: Expr<Probe>) -> Expr<Fluence<F>> {
         let cell = probe.cell.cast_u32();
-        if (cell >= grid.size).any() {
+        let next_grid = self.grid.next();
+        self.next_buffer.read(Axis::join(
+            self.axes,
+            (next_grid.size, Vec2::splat_expr(next_grid.directions + 1)),
+            (cell, probe.dir),
+        ))
+    }
+    #[tracked]
+    pub fn load_opt(&self, probe: Expr<Probe>) -> Expr<Fluence<F>> {
+        let cell = probe.cell.cast_u32();
+        if (cell >= self.grid.size).any() {
             Fluence::empty().expr()
         } else {
-            buffer.read(Axis::join(
+            self.buffer.read(Axis::join(
                 self.axes,
+                (self.grid.size, Vec2::splat_expr(self.grid.directions + 1)),
                 (cell, probe.dir),
-                (grid.size, grid.directions + 1),
             ))
         }
     }
     #[tracked]
-    pub fn store_next<F: FluenceType>(
-        &self,
-        grid: Expr<Grid>,
-        probe: Expr<Probe>,
-        fluence: Expr<Fluence<F>>,
-    ) {
+    pub fn store_next(&self, probe: Expr<Probe>, fluence: Expr<Fluence<F>>) {
         let cell = probe.cell.cast_u32();
+        let next_grid = self.grid.next();
         self.next_buffer.write(
             Axis::join(
                 self.axes,
+                (next_grid.size, Vec2::splat_expr(next_grid.directions + 1)),
                 (cell, probe.dir),
-                (grid.size, grid.directions + 1),
             ),
             fluence,
         );
     }
 }
 
-impl<F: FluenceType> Tracer<F> for StorageTracer {
-    type Params = (BufferVar<Fluence<F>>, BufferVar<Fluence<F>>);
+impl<F: FluenceType> Tracer<F> for StorageTracer<F> {
     #[tracked]
-    fn trace(
-        &self,
-        (buffer, next_buffer): &Self::Params,
-        grid: Expr<Grid>,
-        probe: Expr<Probe>,
-    ) -> [Expr<Fluence<F>>; 2] {
+    fn trace(&self, probe: Expr<Probe>) -> [Expr<Fluence<F>>; 4] {
         // TODO: Can compress if doing bindless or something.
-        let next_grid = grid.next();
-        let lower_size = next_grid.angle_size(probe.dir * 2);
-        let upper_size = next_grid.angle_size(probe.dir * 2 + 1);
-        if probe.cell.x % 2 == 0 {
-            [
-                self.load(next_buffer, next_grid, probe.next().with_dir(probe.dir * 2))
-                    .restrict_angle(lower_size),
-                self.load(
-                    next_buffer,
-                    next_grid,
-                    probe.next().with_dir((probe.dir + 1) * 2),
+        let next_grid = self.grid.next();
+        if probe.cell.z % 2 == 0 {
+            quads().map(|quad| {
+                self.load_next(
+                    probe
+                        .next()
+                        .with_dir((probe.dir + quad.expr().cast_u32()) * 2),
                 )
-                .restrict_angle(upper_size),
-            ]
+                .restrict_angle(next_grid.angle_size(probe.dir * 2 + quad.expr().cast_u32()))
+            })
         } else {
-            let a = buffer.len_expr_u32() >= (grid.size.x * grid.size.y * (grid.directions + 1));
-            lc_assert!(a);
-            [
-                self.load(buffer, grid, probe).restrict_angle(lower_size),
-                self.load(buffer, grid, probe.with_dir(probe.dir + 1))
-                    .restrict_angle(upper_size),
-            ]
+            quads().map(|quad| {
+                self.load(probe.with_dir(probe.dir + quad.expr().cast_u32()))
+                    .restrict_angle(next_grid.angle_size(probe.dir * 2 + quad.expr().cast_u32()))
+            })
         }
     }
 }
@@ -231,63 +224,36 @@ impl<F: FluenceType> Tracer<F> for StorageTracer {
 // TODO: try to prevent integer division / multiplication
 #[tracked]
 pub fn merge_up<F: FluenceType>(
-    storage: &StorageTracer,
-    last_buffer: &BufferVar<Fluence<F>>,
-    grid: Expr<Grid>,
-    probe: Expr<Probe>,
+    storage: &StorageTracer<F>,
+    next_probe: Expr<Probe>,
 ) -> Expr<Fluence<F>>
 where
     F::Transmittance: PartialTransmittance,
 {
-    let cell = probe.cell;
-    let dir = probe.dir;
+    let next_cell = next_probe.cell;
+    let next_dir = next_probe.dir;
 
-    let last_grid = grid.last();
-    let last_cell = Vec2::expr(cell.x * 2, cell.y);
-    let offset = grid.ray_offset(dir);
-    if dir % 2 == 0 {
-        let last_dir = dir / 2;
+    let next_grid = storage.grid.next();
+    let cell = Vec3::expr(next_cell.x, next_cell.y, next_cell.z * 2);
+    let offset = next_grid.ray_offset(next_dir);
+    Fluence::blend_n(&quads().map(|quad| {
+        let mid_offset = offset.cast_f32() / 2.0;
+        let dir = next_dir / 2 + quad.expr().cast_u32();
         let midpoint = Probe::expr(
-            // TODO: integer division ow
-            last_cell + Vec2::expr(1, offset / 2),
-            last_dir,
+            cell + quad
+                .expr()
+                .select(
+                    // TODO: Can make this more efficient.
+                    (mid_offset / 2.0).ceil() * 2.0,
+                    (mid_offset / 2.0).floor() * 2.0,
+                )
+                .cast_i32()
+                .extend(1),
+            next_dir / 2 + 1 - quad.expr().cast_u32(),
         );
-
         F::over(
-            storage.load(last_buffer, last_grid, Probe::expr(last_cell, last_dir)),
-            storage.load_opt(last_buffer, last_grid, midpoint),
+            storage.load(Probe::expr(cell, dir)),
+            storage.load_opt(midpoint),
         )
-    } else {
-        let last_dir_lower = dir / 2;
-        let last_dir_upper = dir / 2 + 1;
-        // TODO: Can simplify by expanding offset.
-        let midpoint_lower = Probe::expr(
-            last_cell + Vec2::expr(1, (offset.cast_f32() / 2.0).floor().cast_i32()),
-            last_dir_upper,
-        );
-        let midpoint_upper = Probe::expr(
-            last_cell + Vec2::expr(1, (offset.cast_f32() / 2.0).ceil().cast_i32()),
-            last_dir_lower,
-        );
-
-        Fluence::blend(
-            F::over(
-                storage.load(
-                    last_buffer,
-                    last_grid,
-                    Probe::expr(last_cell, last_dir_lower),
-                ),
-                storage.load_opt(last_buffer, last_grid, midpoint_lower),
-            ),
-            F::over(
-                storage.load(
-                    last_buffer,
-                    last_grid,
-                    Probe::expr(last_cell, last_dir_upper),
-                ),
-                storage.load_opt(last_buffer, last_grid, midpoint_upper),
-            ),
-        )
-    }
+    }))
 }
- */

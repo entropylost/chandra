@@ -1,6 +1,6 @@
 use glam::{Mat3 as FMat3, UVec3};
 use hrc::storage::{BufferStorage, RadianceStorage};
-use hrc::trace::{VoxelTracer, WorldMapper};
+use hrc::trace::{StorageTracer, VoxelTracer, WorldMapper, merge_up};
 use hrc::{Axis, Grid, Probe};
 use keter::lang::types::vector::{Mat3, Vec2, Vec3};
 use keter::prelude::*;
@@ -51,7 +51,7 @@ impl Camera {
 }
 
 type Color = hrc::color::Color<hrc::color::BinaryF32>;
-type Fluence = hrc::fluence::Fluence<hrc::fluence::BinaryF32>;
+type Fluence = hrc::fluence::Fluence<hrc::fluence::SingleF32>;
 
 // do sudo nvidia-smi --lock-gpu-clocks=405,1500 before running to make it have fixed time.
 // nvidia-smi -q -d SUPPORTED_CLOCKS
@@ -89,8 +89,16 @@ fn main() {
     let size = Vec3::from(size);
 
     let base_grid = Grid::new(Vec3::splat(base_size), 1);
-    // Don't actually need the =, again.
-    let buffer_pyramid = (0..=base_size.trailing_zeros())
+
+    let ray_pyramid = (0..base_size.trailing_zeros())
+        .map(|level| {
+            let mut grid = base_grid.shift(level);
+            grid.directions += 1;
+            DEVICE.create_buffer::<Fluence>(grid.size() as usize)
+        })
+        .collect::<Vec<_>>();
+
+    let radiance_pyramid = (0..base_size.trailing_zeros())
         .map(|level| {
             let grid = base_grid.shift(level);
             DEVICE.create_buffer::<f32>(grid.size() as usize)
@@ -112,10 +120,10 @@ fn main() {
         Axis::DirectionV,
     ];
 
-    let merge = DEVICE.create_kernel::<fn(u32, Buffer<f32>, Buffer<f32>, Mat3, Vec3<f32>)>(
-        &track!(|level, buffer, next_buffer, rotation, offset| {
+    let store = DEVICE.create_kernel::<fn(u32, Buffer<Fluence>, Mat3, Vec3<f32>)>(&track!(
+        |level, buffer, rotation, offset| {
             let grid = base_grid.expr().shift(level);
-            let tracer = WorldMapper::<hrc::fluence::BinaryF32, _> {
+            let tracer = WorldMapper::<hrc::fluence::SingleF32, _> {
                 tracer: &voxel_tracer,
                 grid,
                 rotation,
@@ -123,22 +131,66 @@ fn main() {
                 _marker: Default::default(),
             };
 
-            let probe = Axis::extract(
+            let (cell, dir) = Axis::extract(
                 axes,
-                (grid.size, Vec2::splat_expr(grid.directions)),
+                (grid.size, Vec2::splat_expr(grid.directions + 1)),
                 dispatch_id().x,
             );
-            let probe = Probe::expr(probe.0.cast_i32(), probe.1);
-            let storage = BufferStorage {
+            let probe = Probe::expr(cell.cast_i32(), dir);
+
+            let fluence = tracer.compute_ray(probe);
+
+            buffer.write(dispatch_id().x, fluence);
+        }
+    ));
+    let merge_up = DEVICE.create_kernel::<fn(u32, Buffer<Fluence>, Buffer<Fluence>)>(&track!(
+        |level, buffer, next_buffer| {
+            let grid = base_grid.expr().shift(level);
+            let next_grid = grid.next();
+
+            let (cell, dir) = Axis::extract(
                 axes,
-                grid: grid.next(),
-                buffer: next_buffer,
+                (next_grid.size, Vec2::splat_expr(next_grid.directions + 1)),
+                dispatch_id().x,
+            );
+            let next_probe = Probe::expr(cell.cast_i32(), dir);
+            let storage = StorageTracer {
+                axes,
+                grid,
+                buffer,
+                next_buffer: next_buffer.clone(),
             };
-            let radiance = hrc::merge(grid, probe, &storage, &tracer);
-            BufferStorage { axes, grid, buffer }.store(probe, radiance);
-        }),
-    );
-    println!("Size: {:?}", size);
+            let fluence = merge_up(&storage, next_probe);
+            next_buffer.write(dispatch_id().x, fluence);
+        }
+    ));
+
+    let merge = DEVICE
+        .create_kernel::<fn(u32, Buffer<Fluence>, Buffer<Fluence>, Buffer<f32>, Buffer<f32>)>(
+            &track!(|level, ray_buffer, next_ray_buffer, buffer, next_buffer| {
+                let grid = base_grid.expr().shift(level);
+                let tracer = StorageTracer {
+                    axes,
+                    grid,
+                    buffer: ray_buffer,
+                    next_buffer: next_ray_buffer,
+                };
+
+                let probe = Axis::extract(
+                    axes,
+                    (grid.size, Vec2::splat_expr(grid.directions)),
+                    dispatch_id().x,
+                );
+                let probe = Probe::expr(probe.0.cast_i32(), probe.1);
+                let storage = BufferStorage {
+                    axes,
+                    grid: grid.next(),
+                    buffer: next_buffer,
+                };
+                let radiance = hrc::merge(grid, probe, &storage, &tracer);
+                BufferStorage { axes, grid, buffer }.store(probe, radiance);
+            }),
+        );
     let copy_final = DEVICE.create_kernel::<fn(Mat3, Vec3<f32>)>(&track!(|rotation, offset| {
         let probe = Probe::expr(
             dispatch_id().cast_i32() + Vec3::new(0, 0, 1),
@@ -147,7 +199,7 @@ fn main() {
         let radiance = BufferStorage {
             axes,
             grid: base_grid.expr(),
-            buffer: buffer_pyramid[0].var(),
+            buffer: radiance_pyramid[0].var(),
         }
         .load(probe);
         let pos_norm = dispatch_id().cast_f32() / base_size as f32;
@@ -180,15 +232,36 @@ fn main() {
     let start = std::time::Instant::now();
 
     for (rotation, offset) in transforms {
-        for level in (0..base_size.trailing_zeros()).rev() {
-            println!("loading: {:?}", level);
+        for level in 0..base_size.trailing_zeros() {
+            println!("Storing: {:?}", level);
+            let mut grid = base_grid.shift(level);
+            grid.directions += 1;
+            if true {
+                store.dispatch_blocking(
+                    [grid.size(), 1, 1],
+                    &level,
+                    &ray_pyramid[level as usize],
+                    &rotation,
+                    &offset,
+                );
+            } else {
+                merge_up.dispatch_blocking(
+                    [grid.size(), 1, 1],
+                    &(level - 1),
+                    &ray_pyramid[(level - 1) as usize],
+                    &ray_pyramid[level as usize],
+                );
+            }
+        }
+        for level in (0..base_size.trailing_zeros() - 1).rev() {
+            println!("Loading: {:?}", level);
             merge.dispatch_blocking(
                 [base_grid.shift(level).size(), 1, 1],
                 &level,
-                &buffer_pyramid[level as usize],
-                &buffer_pyramid[(level + 1) as usize],
-                &rotation,
-                &offset,
+                &ray_pyramid[level as usize],
+                &ray_pyramid[(level + 1) as usize],
+                &radiance_pyramid[level as usize],
+                &radiance_pyramid[(level + 1) as usize],
             );
         }
         println!("Copying final");

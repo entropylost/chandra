@@ -183,19 +183,6 @@ impl<F: FluenceType> StorageTracer<F> {
             ))
         }
     }
-    #[tracked]
-    pub fn store_next(&self, probe: Expr<Probe>, fluence: Expr<Fluence<F>>) {
-        let cell = probe.cell.cast_u32();
-        let next_grid = self.grid.next();
-        self.next_buffer.write(
-            Axis::join(
-                self.axes,
-                (next_grid.size, Vec2::splat_expr(next_grid.directions + 1)),
-                (cell, probe.dir),
-            ),
-            fluence,
-        );
-    }
 }
 
 impl<F: FluenceType> Tracer<F> for StorageTracer<F> {

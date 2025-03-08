@@ -236,11 +236,10 @@ fn main() {
 
     for (rotation, offset) in transforms {
         for level in 0..base_size.trailing_zeros() {
-            println!("Storing: {:?}", level);
             let mut grid = base_grid.shift(level);
             grid.directions += 1;
             if level < 3 {
-                store.dispatch_blocking(
+                store.dispatch(
                     [grid.size(), 1, 1],
                     &level,
                     &ray_pyramid[level as usize],
@@ -248,7 +247,7 @@ fn main() {
                     &offset,
                 );
             } else {
-                merge_up.dispatch_blocking(
+                merge_up.dispatch(
                     [grid.size(), 1, 1],
                     &(level - 1),
                     &ray_pyramid[(level - 1) as usize],
@@ -257,8 +256,7 @@ fn main() {
             }
         }
         for level in (0..base_size.trailing_zeros() - 1).rev() {
-            println!("Loading: {:?}", level);
-            merge.dispatch_blocking(
+            merge.dispatch(
                 [base_grid.shift(level).size(), 1, 1],
                 &level,
                 &ray_pyramid[level as usize],
@@ -267,9 +265,9 @@ fn main() {
                 &radiance_pyramid[(level + 1) as usize],
             );
         }
-        println!("Copying final");
-        copy_final.dispatch_blocking([base_size, base_size, base_size], &rotation, &offset);
+        copy_final.dispatch([base_size, base_size, base_size], &rotation, &offset);
     }
+    DEVICE.default_stream().scope().synchronize();
 
     println!("Time: {:?}", start.elapsed());
 
@@ -353,7 +351,7 @@ fn main() {
         screen_size: app.size().map(|x| x as f32).into(),
         yaw: 0.8,
         pitch: 0.4,
-        pos: Vec3::new(-30.0, -30.0, 60.0),
+        pos: Vec3::new(-60.0, -60.0, 120.0),
         fov: 1.15,
     };
 
@@ -390,8 +388,6 @@ fn main() {
             slice = slice.saturating_sub(1);
             println!("Slice: {:?}", slice);
         }
-
-        rt.log_fps();
 
         draw_kernel.dispatch(rt.dispatch_size(), &camera.view(), &slice);
         // draw_lines.dispatch([lines.len() as u32, 256, 1], &camera.view());

@@ -79,9 +79,9 @@ fn main() {
     let mut voxels = vec![255; size.element_product() as usize];
     for voxel in &model.voxels {
         let pos = UVec3::new(voxel.x as u32, voxel.y as u32, voxel.z as u32);
-        // if pos.cmpeq(UVec3::splat(0)).any() || pos.cmpge(size - 1).any() {
-        //     continue;
-        // }
+        if pos.cmpge(size).any() {
+            continue;
+        }
         voxels[to_linear(pos, size)] = voxel.i;
     }
     let voxels = DEVICE.create_buffer_from_slice(&voxels);
@@ -370,19 +370,23 @@ fn main() {
         } else {
             200.0
         } * rt.frame_time();
-        rt.process_keys_down(|key| match key {
-            KeyCode::ArrowLeft => camera.yaw -= 1.0 * rot_speed,
-            KeyCode::ArrowRight => camera.yaw += 1.0 * rot_speed,
-            KeyCode::ArrowUp => camera.pitch -= 1.0 * rot_speed,
+        for key in &rt.keys_down {
+            match key {
+                KeyCode::ArrowLeft => camera.yaw -= 1.0 * rot_speed,
+                KeyCode::ArrowRight => camera.yaw += 1.0 * rot_speed,
+                KeyCode::ArrowUp => camera.pitch -= 1.0 * rot_speed,
             KeyCode::ArrowDown => camera.pitch += 1.0 * rot_speed,
             KeyCode::KeyW => camera.pos = camera.pos + camera.forward() * move_speed,
             KeyCode::KeyS => camera.pos = camera.pos - camera.forward() * move_speed,
-            KeyCode::KeyA => camera.pos = camera.pos - camera.right() * move_speed,
-            KeyCode::KeyD => camera.pos = camera.pos + camera.right() * move_speed,
-            KeyCode::Space => camera.pos = camera.pos + Vec3::new(0.0, 0.0, 1.0) * move_speed,
-            KeyCode::ShiftLeft => camera.pos = camera.pos - Vec3::new(0.0, 0.0, 1.0) * move_speed,
-            _ => (),
-        });
+                KeyCode::KeyA => camera.pos = camera.pos - camera.right() * move_speed,
+                KeyCode::KeyD => camera.pos = camera.pos + camera.right() * move_speed,
+                KeyCode::Space => camera.pos = camera.pos + Vec3::new(0.0, 0.0, 1.0) * move_speed,
+                KeyCode::ShiftLeft => {
+                    camera.pos = camera.pos - Vec3::new(0.0, 0.0, 1.0) * move_speed
+                }
+                _ => (),
+            }
+        }
         if rt.key_pressed(KeyCode::Digit1) {
             slice = 0;
         }

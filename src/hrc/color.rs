@@ -96,6 +96,18 @@ impl Opacity for f32 {
         f32::INFINITY
     }
 }
+impl Opacity for f16 {
+    #[tracked]
+    fn is_transparent(this: Expr<Self>) -> Expr<bool> {
+        this == Self::transparent()
+    }
+    fn transparent() -> Self {
+        f16::ZERO
+    }
+    fn opaque() -> Self {
+        f16::INFINITY
+    }
+}
 impl Opacity for Vec3<f32> {
     #[tracked]
     fn is_transparent(this: Expr<Self>) -> Expr<bool> {
@@ -164,6 +176,27 @@ impl ToFluence<fluence::RgbF16> for RgbF16 {
     ) -> Expr<Fluence<fluence::RgbF16>> {
         let transmittance = (-color.opacity * segment_length.cast_f16()).exp();
         Fluence::expr(color.emission * (f16::ONE - transmittance), transmittance)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RgbF16Single;
+impl ColorType for RgbF16Single {
+    type Emission = Vec3<f16>;
+    // Kinda sad that this doesn't compress well.
+    type Opacity = f32;
+}
+impl ToFluence<fluence::RgbF16Single> for RgbF16Single {
+    #[tracked]
+    fn to_fluence(
+        color: Expr<Color<Self>>,
+        segment_length: Expr<f32>,
+    ) -> Expr<Fluence<fluence::RgbF16Single>> {
+        let transmittance = (-color.opacity * segment_length).exp();
+        Fluence::expr(
+            color.emission * (1.0 - transmittance).cast_f16(),
+            transmittance,
+        )
     }
 }
 

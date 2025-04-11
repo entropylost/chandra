@@ -50,8 +50,8 @@ impl Camera {
     }
 }
 
-type Color = hrc::color::Color<hrc::color::BinaryF32>;
-type Fluence = hrc::fluence::Fluence<hrc::fluence::SingleF32>;
+type Color = hrc::color::Color<hrc::color::RgbF16Single>;
+type Fluence = hrc::fluence::Fluence<hrc::fluence::RgbF16Single>;
 
 // do sudo nvidia-smi --lock-gpu-clocks=405,1500 before running to make it have fixed time.
 // nvidia-smi -q -d SUPPORTED_CLOCKS
@@ -66,9 +66,11 @@ fn main() {
     });
     let color_palette = DEVICE.create_buffer_from_fn(file.palette.len(), |i| {
         if i == 0 {
-            Color::solid(10.0_f32)
+            Color::solid(Vec3::splat(f16::from_f32(10.0)))
+        } else if i == 255 {
+            Color::empty()
         } else {
-            Color::solid(0.0_f32)
+            Color::solid(Vec3::splat(f16::from_f32(0.0)))
         }
     });
 
@@ -101,11 +103,12 @@ fn main() {
     let radiance_pyramid = (0..base_size.trailing_zeros())
         .map(|level| {
             let grid = base_grid.shift(level);
-            DEVICE.create_buffer::<f32>(grid.size() as usize)
+            DEVICE.create_buffer::<Vec3<f16>>(grid.size() as usize)
         })
         .collect::<Vec<_>>();
 
-    let final_radiance = DEVICE.create_buffer::<f32>((base_size * base_size * base_size) as usize);
+    let final_radiance =
+        DEVICE.create_buffer::<Vec3<f16>>((base_size * base_size * base_size) as usize);
 
     let voxel_tracer = VoxelTracer {
         palette: color_palette.view(..),
@@ -123,7 +126,7 @@ fn main() {
     let store = DEVICE.create_kernel::<fn(u32, Buffer<Fluence>, Mat3, Vec3<f32>)>(&track!(
         |level, buffer, rotation, offset| {
             let grid = base_grid.expr().shift(level);
-            let tracer = WorldMapper::<hrc::fluence::SingleF32, _> {
+            let tracer = WorldMapper::<hrc::fluence::RgbF16Single, _> {
                 tracer: &voxel_tracer,
                 grid,
                 rotation,
@@ -165,35 +168,42 @@ fn main() {
         }
     ));
 
-    let merge = DEVICE
-        .create_kernel::<fn(u32, Buffer<Fluence>, Buffer<Fluence>, Buffer<f32>, Buffer<f32>)>(
-            &track!(|level, ray_buffer, next_ray_buffer, buffer, next_buffer| {
-                let grid = base_grid.expr().shift(level);
+    let merge = DEVICE.create_kernel::<fn(
+        u32,
+        Buffer<Fluence>,
+        Buffer<Fluence>,
+        Buffer<Vec3<f16>>,
+        Buffer<Vec3<f16>>,
+    )>(&track!(|level,
+                                      ray_buffer,
+                                      next_ray_buffer,
+                                      buffer,
+                                      next_buffer| {
+        let grid = base_grid.expr().shift(level);
 
-                let tracer = StorageTracer {
-                    axes,
-                    grid,
-                    buffer: ray_buffer,
-                    next_buffer: next_ray_buffer,
-                };
+        let tracer = StorageTracer {
+            axes,
+            grid,
+            buffer: ray_buffer,
+            next_buffer: next_ray_buffer,
+        };
 
-                let (cell, dir) = Axis::extract(
-                    axes,
-                    (grid.size, Vec2::splat_expr(grid.directions)),
-                    dispatch_id().x,
-                );
-                let probe = Probe::expr(cell.cast_i32(), dir);
-                let trace = tracer.trace(probe);
-
-                let storage = BufferStorage {
-                    axes,
-                    grid: grid.next(),
-                    buffer: next_buffer,
-                };
-                let radiance = hrc::merge(grid, probe, trace, &storage);
-                BufferStorage { axes, grid, buffer }.store(probe, radiance);
-            }),
+        let (cell, dir) = Axis::extract(
+            axes,
+            (grid.size, Vec2::splat_expr(grid.directions)),
+            dispatch_id().x,
         );
+        let probe = Probe::expr(cell.cast_i32(), dir);
+        let trace = tracer.trace(probe);
+
+        let storage = BufferStorage {
+            axes,
+            grid: grid.next(),
+            buffer: next_buffer,
+        };
+        let radiance = hrc::merge(grid, probe, trace, &storage);
+        BufferStorage { axes, grid, buffer }.store(probe, radiance);
+    }));
     let copy_final = DEVICE.create_kernel::<fn(Mat3, Vec3<f32>)>(&track!(|rotation, offset| {
         let probe = Probe::expr(
             dispatch_id().cast_i32() + Vec3::new(0, 0, 1),
@@ -297,17 +307,16 @@ fn main() {
                     10000.0.expr(),
                     (Vec3::splat_expr(0.01), size.expr().cast_f32() - 0.01),
                     |pos, last_t, next_t| {
-                        if (slice != 0 && pos.y == slice)
-                            || (slice == 0
-                                && voxels.read(to_linear_expr(pos, Vec3::from(size))) != 255)
-                        {
+                        let v = voxels.read(to_linear_expr(pos, Vec3::from(size)));
+                        let color = color_palette.read(v.cast_u32());
+                        if (slice != 0 && pos.y == slice) || (slice == 0 && v != 255) {
                             *time = (last_t + next_t) / 2.0;
                             true.expr()
                         } else {
                             let segment_size = next_t - last_t;
                             let radiance = final_radiance.read(to_linear_expr(pos, size));
                             *ambient = ambient.over(
-                                hrc::color::Color::<hrc::color::SingleF32>::expr(
+                                hrc::color::Color::<hrc::color::RgbF16Single>::expr(
                                     radiance,
                                     0.001.expr(),
                                 )
@@ -328,13 +337,13 @@ fn main() {
 
                 let radiance =
                     if (prev_voxel < 0).any() || (prev_voxel >= size.expr().cast_i32()).any() {
-                        0.0_f32.expr()
+                        Vec3::splat_expr(f16::ZERO)
                     } else {
                         final_radiance.read(to_linear_expr(
                             prev_voxel.clamp(0, size.expr().cast_i32() - 1).cast_u32(),
                             size,
                         ))
-                    } + 0.01;
+                    } + f16::from_f32(0.01);
 
                 let color = voxels.read(to_linear_expr(world_voxel.cast_u32(), Vec3::from(size)));
                 // Vec3::splat_expr(num_ddas.cast_f32() * 0.1); // pcg3df(Vec3::expr(hit.inst, hit.prim, 1));
@@ -342,13 +351,14 @@ fn main() {
                 app.set_pixel(
                     pixel.cast_i32(),
                     if (color != Vec3::splat(0.0)).any() {
-                        ambient.radiance + ambient.transmittance * color * radiance
+                        ambient.radiance.cast_f32()
+                            + ambient.transmittance * color * radiance.cast_f32()
                     } else {
-                        Vec3::splat_expr(radiance)
+                        radiance.cast_f32()
                     },
                 );
             } else {
-                app.set_pixel(pixel.cast_i32(), Vec3::splat_expr(ambient.radiance));
+                app.set_pixel(pixel.cast_i32(), ambient.radiance.cast_f32());
             }
         }),
     );
@@ -375,9 +385,9 @@ fn main() {
                 KeyCode::ArrowLeft => camera.yaw -= 1.0 * rot_speed,
                 KeyCode::ArrowRight => camera.yaw += 1.0 * rot_speed,
                 KeyCode::ArrowUp => camera.pitch -= 1.0 * rot_speed,
-            KeyCode::ArrowDown => camera.pitch += 1.0 * rot_speed,
-            KeyCode::KeyW => camera.pos = camera.pos + camera.forward() * move_speed,
-            KeyCode::KeyS => camera.pos = camera.pos - camera.forward() * move_speed,
+                KeyCode::ArrowDown => camera.pitch += 1.0 * rot_speed,
+                KeyCode::KeyW => camera.pos = camera.pos + camera.forward() * move_speed,
+                KeyCode::KeyS => camera.pos = camera.pos - camera.forward() * move_speed,
                 KeyCode::KeyA => camera.pos = camera.pos - camera.right() * move_speed,
                 KeyCode::KeyD => camera.pos = camera.pos + camera.right() * move_speed,
                 KeyCode::Space => camera.pos = camera.pos + Vec3::new(0.0, 0.0, 1.0) * move_speed,

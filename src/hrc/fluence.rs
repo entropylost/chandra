@@ -233,6 +233,25 @@ impl PartialTransmittance for f32 {
         sum * (1.0 / v.len() as f32)
     }
 }
+impl Transmittance for f16 {
+    fn transparent() -> Self {
+        f16::ONE
+    }
+    fn opaque() -> Self {
+        f16::ZERO
+    }
+}
+impl PartialTransmittance for f16 {
+    #[tracked]
+    fn blend(a: Expr<Self>, b: Expr<Self>) -> Expr<Self> {
+        (a + b) * f16::from_f32_const(0.5)
+    }
+    #[tracked]
+    fn blend_n(v: &[Expr<Self>]) -> Expr<Self> {
+        let sum = v.iter().fold(f16::ZERO.expr(), |sum, &x| sum + x);
+        sum * f16::from_f32(1.0 / v.len() as f32)
+    }
+}
 impl Transmittance for Vec3<f32> {
     fn transparent() -> Self {
         Vec3::splat(1.0)
@@ -309,6 +328,24 @@ impl FluenceType for RgbF16 {
     #[tracked]
     fn over_radiance(near: Expr<Fluence<Self>>, far: Expr<Self::Radiance>) -> Expr<Self::Radiance> {
         near.transmittance * far + near.radiance
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RgbF16Single;
+impl FluenceType for RgbF16Single {
+    type Radiance = Vec3<f16>;
+    type Transmittance = f32;
+    #[tracked]
+    fn over(near: Expr<Fluence<Self>>, far: Expr<Fluence<Self>>) -> Expr<Fluence<Self>> {
+        Fluence::expr(
+            near.transmittance.cast_f16() * far.radiance + near.radiance,
+            near.transmittance * far.transmittance,
+        )
+    }
+    #[tracked]
+    fn over_radiance(near: Expr<Fluence<Self>>, far: Expr<Self::Radiance>) -> Expr<Self::Radiance> {
+        near.transmittance.cast_f16() * far + near.radiance
     }
 }
 

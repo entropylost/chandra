@@ -73,6 +73,12 @@ impl Emission for f32 {
         0.0
     }
 }
+
+impl Emission for f16 {
+    fn black() -> Self {
+        f16::ZERO
+    }
+}
 impl Emission for Vec3<f32> {
     fn black() -> Self {
         Vec3::splat(0.0)
@@ -214,6 +220,23 @@ impl ToFluence<fluence::SingleF32> for SingleF32 {
     ) -> Expr<Fluence<fluence::SingleF32>> {
         let transmittance = (-color.opacity * segment_length).exp();
         Fluence::expr(color.emission * (1.0 - transmittance), transmittance)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SingleF16;
+impl ColorType for SingleF16 {
+    type Emission = f16;
+    type Opacity = f16;
+}
+impl ToFluence<fluence::SingleF16> for SingleF16 {
+    #[tracked]
+    fn to_fluence(
+        color: Expr<Color<Self>>,
+        segment_length: Expr<f32>,
+    ) -> Expr<Fluence<fluence::SingleF16>> {
+        let transmittance = (-color.opacity * segment_length.cast_f16()).exp();
+        Fluence::expr(color.emission * (f16::ONE - transmittance), transmittance)
     }
 }
 

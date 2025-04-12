@@ -142,6 +142,33 @@ impl Radiance for f32 {
         1.0
     }
 }
+
+impl Radiance for f16 {
+    #[tracked]
+    fn merge(xs: [Expr<Self>; 4]) -> Expr<Self> {
+        xs[0] + xs[1] + xs[2] + xs[3]
+    }
+    #[tracked]
+    fn blend(a: Expr<Self>, b: Expr<Self>) -> Expr<Self> {
+        (a + b) * f16::from_f32_const(0.5)
+    }
+    #[tracked]
+    fn blend_n(v: &[Expr<Self>]) -> Expr<Self> {
+        let sum = v.iter().fold(f16::ZERO.expr(), |sum, &x| sum + x);
+        sum * f16::from_f32(1.0 / v.len() as f32)
+    }
+    #[tracked]
+    fn scale(this: Expr<Self>, scale: Expr<f32>) -> Expr<Self> {
+        this * scale.cast_f16()
+    }
+    fn black() -> Self {
+        f16::ZERO
+    }
+
+    fn debug_white() -> Self {
+        f16::ONE
+    }
+}
 impl Radiance for Vec3<f32> {
     #[tracked]
     fn merge(xs: [Expr<Self>; 4]) -> Expr<Self> {
@@ -372,6 +399,24 @@ pub struct SingleF32;
 impl FluenceType for SingleF32 {
     type Radiance = f32;
     type Transmittance = f32;
+    #[tracked]
+    fn over(near: Expr<Fluence<Self>>, far: Expr<Fluence<Self>>) -> Expr<Fluence<Self>> {
+        Fluence::expr(
+            near.transmittance * far.radiance + near.radiance,
+            near.transmittance * far.transmittance,
+        )
+    }
+    #[tracked]
+    fn over_radiance(near: Expr<Fluence<Self>>, far: Expr<Self::Radiance>) -> Expr<Self::Radiance> {
+        near.transmittance * far + near.radiance
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SingleF16;
+impl FluenceType for SingleF16 {
+    type Radiance = f16;
+    type Transmittance = f16;
     #[tracked]
     fn over(near: Expr<Fluence<Self>>, far: Expr<Fluence<Self>>) -> Expr<Fluence<Self>> {
         Fluence::expr(

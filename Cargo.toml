@@ -9,6 +9,7 @@ dot_vox = "5.1.1"
 glam = { version = "0.30.0" }
 keter = { path = "../sefirot/keter", features = ["glam", "trace"] }
 keter_testbed = { path = "../sefirot/testbed" }
+noise = { version = "0.9.0", features = ["images"] }
 palette = "0.7.6"
 
 # [profile.dev.package."*"]

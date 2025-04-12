@@ -8,6 +8,7 @@ use keter_testbed::{App, KeyCode};
 
 mod hrc;
 mod utils;
+use noise::{Fbm, NoiseFn, Perlin};
 use utils::{dda, to_linear, to_linear_expr};
 
 #[derive(Debug, Clone, Copy, Value)]
@@ -53,39 +54,103 @@ impl Camera {
 type Color = hrc::color::Color<hrc::color::RgbF16Single>;
 type Fluence = hrc::fluence::Fluence<hrc::fluence::RgbF16Single>;
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Draw {
+    Circle(f32),
+    Rect(f32, f32, f32),
+}
+impl Draw {
+    fn size(self) -> Vec3<f32> {
+        match self {
+            Self::Circle(r) => Vec3::splat(r),
+            Self::Rect(x, y, z) => Vec3::new(x, y, z),
+        }
+    }
+}
+
 // do sudo nvidia-smi --lock-gpu-clocks=405,1500 before running to make it have fixed time.
 // nvidia-smi -q -d SUPPORTED_CLOCKS
 fn main() {
     let app = App::new("Sunfall", [2048; 2]).agx().resize().init();
 
-    let file = dot_vox::load("assets/test2.vox").unwrap();
+    let palette = DEVICE.create_buffer_from_slice(&[Vec3::new(1.0, 1.0, 1.0); 12]);
+    let color_palette = DEVICE.create_buffer_from_slice(&[
+        Color::dark(0.002),
+        Color::solid(Vec3::splat(f16::ZERO)),
+        Color::solid(Vec3::splat(f16::from_f32(5.0))),
+        Color::dark(0.00),
+        Color::dark(0.01),
+        Color::dark(0.02),
+        Color::dark(0.03),
+        Color::dark(0.04),
+        Color::dark(0.05),
+        Color::dark(0.06),
+        Color::dark(0.07),
+        Color::dark(0.08),
+    ]);
 
-    let palette = DEVICE.create_buffer_from_fn(file.palette.len(), |i| {
-        let color = file.palette[i];
-        Vec3::new(color.r as f32, color.g as f32, color.b as f32).map(|x| (x / 255.0).powf(2.2))
-    });
-    let color_palette = DEVICE.create_buffer_from_fn(file.palette.len(), |i| {
-        if i == 0 {
-            Color::solid(Vec3::splat(f16::from_f32(10.0)))
-        } else if i == 255 {
-            Color::empty()
-        } else {
-            Color::solid(Vec3::splat(f16::from_f32(0.0)))
-        }
-    });
-
-    let model = &file.models[0];
     let base_size = 128_u32;
     let size = UVec3::splat(base_size);
 
-    let mut voxels = vec![255; size.element_product() as usize];
-    for voxel in &model.voxels {
-        let pos = UVec3::new(voxel.x as u32, voxel.y as u32, voxel.z as u32);
-        if pos.cmpge(size).any() {
-            continue;
-        }
-        voxels[to_linear(pos, size)] = voxel.i;
+    let mut voxels = vec![0; size.element_product() as usize];
+
+    let fbm = Fbm::<Perlin>::new(150392);
+
+    for pos in (0..base_size).flat_map(|x| {
+        (0..base_size).flat_map(move |y| (0..base_size).map(move |z| UVec3::new(x, y, z)))
+    }) {
+        let value = fbm.get([
+            pos.x as f64 / 32.0,
+            pos.y as f64 / 32.0,
+            pos.z as f64 / 32.0,
+        ]) as f32;
+        let value = (value + 1.0) / 2.0 - pos.z as f32 / base_size as f32 * 1.4;
+        let value = value.clamp(0.0, 0.999);
+        let index = (value * 9.0).floor() as u8;
+        voxels[to_linear(pos, size)] = index + 3;
     }
+
+    for draw in [
+        ([0.0, 64.0, 64.0], Draw::Rect(1.0, 64.0, 64.0), 1),
+        ([128.0, 64.0, 64.0], Draw::Rect(1.0, 64.0, 64.0), 1),
+        ([64.0, 128.0, 64.0], Draw::Rect(64.0, 1.0, 64.0), 1),
+        ([64.0, 64.0, 0.0], Draw::Rect(64.0, 64.0, 1.0), 1),
+        ([64.0, 64.0, 128.0], Draw::Rect(64.0, 64.0, 1.0), 1),
+        ([128.0, 64.0, 64.0], Draw::Rect(3.0, 16.0, 16.0), 2),
+        ([64.0, 64.0, 32.0], Draw::Circle(32.0), 1),
+        ([96.0, 96.0, 40.0], Draw::Rect(10.0, 10.0, 39.0), 3),
+    ] {
+        let (center, draw, color): ([f32; 3], Draw, u8) = draw;
+        let center = Vec3::from(center);
+        let min = (center - draw.size()).map(|x| (x.floor().max(0.0) as u32).min(base_size - 1));
+        let max = (center + draw.size()).map(|x| (x.ceil().max(0.0) as u32).min(base_size - 1));
+        for x in min.x..=max.x {
+            for y in min.y..=max.y {
+                for z in min.z..=max.z {
+                    let pos = Vec3::new(x, y, z);
+                    let offset = pos.map(|x| x as f32 + 0.5) - center;
+                    if match draw {
+                        Draw::Circle(r) => {
+                            offset.map(|x| x * x).elements.into_iter().sum::<f32>() < r * r
+                        }
+                        Draw::Rect(x, y, z) => {
+                            offset.x.abs() <= x && offset.y.abs() <= y && offset.z.abs() <= z
+                        }
+                    } {
+                        voxels[to_linear(pos.into(), size)] = color;
+                    }
+                }
+            }
+        }
+    }
+
+    // for voxel in &model.voxels {
+    //     let pos = UVec3::new(voxel.x as u32, voxel.y as u32, voxel.z as u32);
+    //     if pos.cmpge(size).any() {
+    //         continue;
+    //     }
+    //     voxels[to_linear(pos, size)] = voxel.i;
+    // }
     let voxels = DEVICE.create_buffer_from_slice(&voxels);
 
     let size = Vec3::from(size);
@@ -242,6 +307,14 @@ fn main() {
         ]
     });
 
+    println!(
+        "Size: {:?}gb",
+        (radiance_pyramid.iter().map(|x| x.len()).sum::<usize>() * std::mem::size_of::<Vec3<f16>>()
+            + ray_pyramid.iter().map(|x| x.len()).sum::<usize>() * std::mem::size_of::<Fluence>())
+            as f32
+            / (1024.0_f32).powi(3)
+    );
+
     let start = std::time::Instant::now();
 
     for (rotation, offset) in transforms {
@@ -309,16 +382,17 @@ fn main() {
                     |pos, last_t, next_t| {
                         let v = voxels.read(to_linear_expr(pos, Vec3::from(size)));
                         let color = color_palette.read(v.cast_u32());
-                        if (slice != 0 && pos.y == slice) || (slice == 0 && v != 255) {
+                        if (slice != 0 && pos.y == slice) || (slice == 0 && color.opacity > 5.0) {
                             *time = (last_t + next_t) / 2.0;
                             true.expr()
                         } else {
                             let segment_size = next_t - last_t;
                             let radiance = final_radiance.read(to_linear_expr(pos, size));
+                            let diffuse: Expr<Vec3<f32>> = palette.read(v.cast_u32());
                             *ambient = ambient.over(
                                 hrc::color::Color::<hrc::color::RgbF16Single>::expr(
-                                    radiance,
-                                    0.001.expr(),
+                                    radiance * diffuse.cast_f16() + color.emission,
+                                    color.opacity,
                                 )
                                 .to_fluence(segment_size),
                             );
@@ -365,10 +439,10 @@ fn main() {
 
     let mut camera = Camera {
         screen_size: app.size().map(|x| x as f32).into(),
-        yaw: 0.8,
-        pitch: 0.4,
-        pos: Vec3::new(-60.0, -60.0, 120.0),
-        fov: 1.15,
+        yaw: 0.0,
+        pitch: 0.0,
+        pos: Vec3::new(64.0, -130.0, 64.0),
+        fov: 0.9,
     };
 
     let mut slice: u32 = 0;

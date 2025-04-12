@@ -129,10 +129,8 @@ where
             |pos, last_t, next_t| {
                 let segment_size = next_t - last_t;
                 let value = self.buffer.read(to_linear_expr(pos, self.size));
-                if value != 255 {
-                    let color = self.palette.read(value.cast_u32());
-                    *fluence = fluence.over(color.to_fluence(segment_size));
-                }
+                let color = self.palette.read(value.cast_u32());
+                *fluence = fluence.over(color.to_fluence(segment_size));
                 false.expr()
             },
         );

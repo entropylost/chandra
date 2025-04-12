@@ -71,25 +71,30 @@ impl Draw {
 // do sudo nvidia-smi --lock-gpu-clocks=405,1500 before running to make it have fixed time.
 // nvidia-smi -q -d SUPPORTED_CLOCKS
 fn main() {
-    let app = App::new("Sunfall", [2048; 2]).agx().resize().init();
+    let app = App::new("Sunfall", [2048; 2])
+        .agx()
+        .dither(8)
+        .resize()
+        .init();
 
     let palette = DEVICE.create_buffer_from_slice(&[Vec3::new(1.0, 1.0, 1.0); 12]);
+    let k = 0.05;
     let color_palette = DEVICE.create_buffer_from_slice(&[
         Color::dark(0.002),
         Color::solid(Vec3::splat(f16::ZERO)),
         Color::solid(Vec3::splat(f16::from_f32(5.0))),
-        Color::dark(0.00),
-        Color::dark(0.01),
-        Color::dark(0.02),
-        Color::dark(0.03),
-        Color::dark(0.04),
-        Color::dark(0.05),
-        Color::dark(0.06),
-        Color::dark(0.07),
-        Color::dark(0.08),
+        Color::dark(0.0 * k),
+        Color::dark(1.0 * k),
+        Color::dark(2.0 * k),
+        Color::dark(3.0 * k),
+        Color::dark(4.0 * k),
+        Color::dark(5.0 * k),
+        Color::dark(6.0 * k),
+        Color::dark(7.0 * k),
+        Color::dark(8.0 * k),
     ]);
 
-    let base_size = 128_u32;
+    let base_size = 64_u32;
     let size = UVec3::splat(base_size);
 
     let mut voxels = vec![0; size.element_product() as usize];
@@ -111,14 +116,13 @@ fn main() {
     }
 
     for draw in [
-        ([0.0, 64.0, 64.0], Draw::Rect(1.0, 64.0, 64.0), 1),
-        ([128.0, 64.0, 64.0], Draw::Rect(1.0, 64.0, 64.0), 1),
-        ([64.0, 128.0, 64.0], Draw::Rect(64.0, 1.0, 64.0), 1),
-        ([64.0, 64.0, 0.0], Draw::Rect(64.0, 64.0, 1.0), 1),
-        ([64.0, 64.0, 128.0], Draw::Rect(64.0, 64.0, 1.0), 1),
-        ([128.0, 64.0, 64.0], Draw::Rect(3.0, 16.0, 16.0), 2),
-        ([64.0, 64.0, 32.0], Draw::Circle(32.0), 1),
-        ([96.0, 96.0, 40.0], Draw::Rect(10.0, 10.0, 39.0), 3),
+        ([0.0, 32.0, 32.0], Draw::Rect(1.0, 32.0, 32.0), 1),
+        ([64.0, 32.0, 32.0], Draw::Rect(1.0, 32.0, 32.0), 1),
+        ([32.0, 64.0, 32.0], Draw::Rect(32.0, 1.0, 32.0), 1),
+        ([32.0, 32.0, 0.0], Draw::Rect(32.0, 32.0, 1.0), 1),
+        ([32.0, 32.0, 64.0], Draw::Rect(32.0, 32.0, 1.0), 1),
+        ([64.0, 32.0, 32.0], Draw::Rect(3.0, 8.0, 8.0), 2),
+        ([32.0, 32.0, 16.0], Draw::Circle(16.0), 1),
     ] {
         let (center, draw, color): ([f32; 3], Draw, u8) = draw;
         let center = Vec3::from(center);
@@ -155,7 +159,7 @@ fn main() {
 
     let size = Vec3::from(size);
 
-    let base_grid = Grid::new(Vec3::splat(base_size), 1);
+    let base_grid = Grid::new(Vec3::splat(base_size), 2);
 
     let ray_pyramid = (0..base_size.trailing_zeros())
         .map(|level| {
@@ -270,16 +274,20 @@ fn main() {
         BufferStorage { axes, grid, buffer }.store(probe, radiance);
     }));
     let copy_final = DEVICE.create_kernel::<fn(Mat3, Vec3<f32>)>(&track!(|rotation, offset| {
-        let probe = Probe::expr(
-            dispatch_id().cast_i32() + Vec3::new(0, 0, 1),
-            Vec2::splat_expr(0),
-        );
-        let radiance = BufferStorage {
+        let storage = BufferStorage {
             axes,
             grid: base_grid.expr(),
             buffer: radiance_pyramid[0].var(),
+        };
+        let radiance = Vec3::splat(f16::ZERO).var();
+        for quad in hrc::quads() {
+            let probe = Probe::expr(
+                dispatch_id().cast_i32() + Vec3::new(quad.x as i32, quad.y as i32, 0),
+                Vec2::new(quad.x as u32, quad.y as u32).expr(),
+            );
+            *radiance += storage.load(probe);
         }
-        .load(probe);
+        // TODO: Add final-voxel tracing. Also make surface lookups work properly.
         let pos_norm = dispatch_id().cast_f32() / base_size as f32;
         let pos = rotation * pos_norm + offset;
         let pos = pos.cast_u32();
@@ -299,10 +307,15 @@ fn main() {
             base_size as f32 * FMat3::from_cols(perp2.as_vec3(), perp1.as_vec3(), -dir.as_vec3()),
         );
         [
-            (rotation, Vec3::splat(0.5)),
+            (
+                rotation,
+                Vec3::splat(0.5),
+                Vec3::from(dir.as_vec3()) * 1.5 + Vec3::splat(0.001),
+            ),
             (
                 opposite_rotation,
                 Vec3::splat(0.5) + Vec3::from(dir.as_vec3()) * (base_size as f32 - 1.0),
+                Vec3::from(dir.as_vec3()) * (base_size as f32 - 1.5) + Vec3::splat(0.001),
             ),
         ]
     });
@@ -317,17 +330,17 @@ fn main() {
 
     let start = std::time::Instant::now();
 
-    for (rotation, offset) in transforms {
+    for (rotation, offset, trace_offset) in transforms {
         for level in 0..base_size.trailing_zeros() {
             let mut grid = base_grid.shift(level);
             grid.directions += 1;
-            if level < 3 {
+            if level == 0 || level == 1 {
                 store.dispatch(
                     [grid.size(), 1, 1],
                     &level,
                     &ray_pyramid[level as usize],
                     &rotation,
-                    &offset,
+                    &trace_offset,
                 );
             } else {
                 merge_up.dispatch(
@@ -441,7 +454,7 @@ fn main() {
         screen_size: app.size().map(|x| x as f32).into(),
         yaw: 0.0,
         pitch: 0.0,
-        pos: Vec3::new(64.0, -130.0, 64.0),
+        pos: Vec3::new(32.0, -64.0, 32.0),
         fov: 0.9,
     };
 

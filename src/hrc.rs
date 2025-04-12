@@ -117,19 +117,19 @@ impl GridExpr {
 
     #[tracked]
     pub fn ray_offset(self, dir: Expr<Vec2<u32>>) -> Expr<Vec2<i32>> {
-        2 * dir.cast_i32() - self.directions.cast_i32()
+        dir.cast_i32() - self.directions.cast_i32() / 2
     }
     #[tracked]
     pub fn lower_offset(self, dir: Expr<Vec2<u32>>) -> Expr<Vec2<i32>> {
-        2 * dir.cast_i32() - self.directions.cast_i32()
+        dir.cast_i32() - self.directions.cast_i32() / 2
     }
     #[tracked]
     pub fn upper_offset(self, dir: Expr<Vec2<u32>>) -> Expr<Vec2<i32>> {
-        2 * dir.cast_i32() - self.directions.cast_i32() + 2
+        dir.cast_i32() - self.directions.cast_i32() / 2 + 1
     }
     #[tracked]
     pub fn offset(self, dir: Expr<Vec2<f32>>) -> Expr<Vec2<f32>> {
-        2.0 * dir - self.directions.cast_f32() + 1.0
+        dir - (self.directions / 2).cast_f32() + 0.5
     }
     #[tracked]
     pub fn angle_size(self, dir: Expr<Vec2<u32>>) -> Expr<f32> {
@@ -138,8 +138,8 @@ impl GridExpr {
             ((size.x * size.y) / (1.0 + size.x.sqr() + size.y.sqr()).sqrt()).atan()
         }
 
-        let upper = self.offset(dir.cast_f32() + 0.5) / self.directions.cast_f32();
-        let lower = self.offset(dir.cast_f32() - 0.5) / self.directions.cast_f32();
+        let upper = self.offset(dir.cast_f32() + 0.5) / (self.directions / 2).cast_f32();
+        let lower = self.offset(dir.cast_f32() - 0.5) / (self.directions / 2).cast_f32();
 
         area_to(upper)
             - area_to(Vec2::expr(upper.x, lower.y))
@@ -173,7 +173,7 @@ impl ProbeExpr {
     }
 }
 
-fn quads() -> [Vec2<bool>; 4] {
+pub fn quads() -> [Vec2<bool>; 4] {
     [
         Vec2::new(false, false),
         Vec2::new(true, false),

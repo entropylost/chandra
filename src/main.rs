@@ -77,12 +77,13 @@ fn main() {
         .resize()
         .init();
 
-    let palette = DEVICE.create_buffer_from_slice(&[1.0_f32; 12]);
-    let k = 0.05;
+    let palette = DEVICE.create_buffer_from_slice(&[1.0_f32; 13]);
+    let k = 0.02;
     let color_palette = DEVICE.create_buffer_from_slice(&[
         Color::dark(0.002),
         Color::solid(0.0),
-        Color::solid(3.0),
+        Color::solid(10.0),
+        Color::dark(100.0),
         Color::dark(0.0 * k),
         Color::dark(1.0 * k),
         Color::dark(2.0 * k),
@@ -94,12 +95,13 @@ fn main() {
         Color::dark(8.0 * k),
     ]);
 
-    let base_size = 64_u32;
+    let base_size = 128_u32;
+    let num_cascades = base_size.trailing_zeros();
     let size = UVec3::splat(base_size);
 
     let mut voxels = vec![0; size.element_product() as usize];
 
-    let fbm = Fbm::<Perlin>::new(150392);
+    let fbm = Fbm::<Perlin>::new(15039);
 
     for pos in (0..base_size).flat_map(|x| {
         (0..base_size).flat_map(move |y| (0..base_size).map(move |z| UVec3::new(x, y, z)))
@@ -112,17 +114,21 @@ fn main() {
         let value = (value + 1.0) / 2.0 - pos.z as f32 / base_size as f32 * 1.4;
         let value = value.clamp(0.0, 0.999);
         let index = (value * 9.0).floor() as u8;
-        voxels[to_linear(pos, size)] = index + 3;
+        voxels[to_linear(pos, size)] = index + 4;
     }
 
     for draw in [
-        // ([0.0, 32.0, 32.0], Draw::Rect(1.0, 32.0, 32.0), 1),
-        // ([64.0, 32.0, 32.0], Draw::Rect(1.0, 32.0, 32.0), 1),
-        // ([32.0, 64.0, 32.0], Draw::Rect(32.0, 1.0, 32.0), 1),
-        ([32.0, 32.0, 0.0], Draw::Rect(32.0, 32.0, 1.0), 1),
-        // ([32.0, 32.0, 64.0], Draw::Rect(32.0, 32.0, 1.0), 1),
-        // ([64.0, 32.0, 32.0], Draw::Rect(3.0, 8.0, 8.0), 2),
-        ([32.0, 32.0, 16.0], Draw::Circle(8.0), 2),
+        ([0.0, 64.0, 64.0], Draw::Rect(1.0, 64.0, 64.0), 1),
+        ([128.0, 64.0, 64.0], Draw::Rect(1.0, 64.0, 64.0), 1),
+        ([64.0, 128.0, 64.0], Draw::Rect(64.0, 1.0, 64.0), 1),
+        ([64.0, 64.0, 0.0], Draw::Rect(64.0, 64.0, 1.0), 1),
+        ([64.0, 64.0, 128.0], Draw::Rect(64.0, 64.0, 1.0), 1),
+        ([128.0, 64.0, 64.0], Draw::Rect(3.0, 16.0, 16.0), 2),
+        ([64.0, 64.0, 40.0], Draw::Circle(32.0), 1),
+        // ([48.0, 80.0, 0.0], Draw::Rect(10.0, 10.0, 128.0), 1),
+        // ([32.0, 128.0, 96.0], Draw::Rect(4.0, 128.0, 4.0), 3),
+        // ([64.0, 128.0, 96.0], Draw::Rect(4.0, 128.0, 4.0), 3),
+        // ([96.0, 128.0, 96.0], Draw::Rect(4.0, 128.0, 4.0), 3),
     ] {
         let (center, draw, color): ([f32; 3], Draw, u8) = draw;
         let center = Vec3::from(center);
@@ -135,10 +141,12 @@ fn main() {
                     let offset = pos.map(|x| x as f32 + 0.5) - center;
                     if match draw {
                         Draw::Circle(r) => {
-                            offset.map(|x| x * x).elements.into_iter().sum::<f32>() < r * r
+                            offset.map(|x| x * x).elements.into_iter().sum::<f32>() < r * r + 0.0001
                         }
                         Draw::Rect(x, y, z) => {
-                            offset.x.abs() <= x && offset.y.abs() <= y && offset.z.abs() <= z
+                            offset.x.abs() <= x + 0.0001
+                                && offset.y.abs() <= y + 0.0001
+                                && offset.z.abs() <= z + 0.0001
                         }
                     } {
                         voxels[to_linear(pos.into(), size)] = color;
@@ -161,15 +169,7 @@ fn main() {
 
     let base_grid = Grid::new(Vec3::splat(base_size), 2);
 
-    let ray_pyramid = (0..base_size.trailing_zeros())
-        .map(|level| {
-            let mut grid = base_grid.shift(level);
-            grid.directions += 1;
-            DEVICE.create_buffer::<Fluence>(grid.size() as usize)
-        })
-        .collect::<Vec<_>>();
-
-    let radiance_pyramid = (0..base_size.trailing_zeros())
+    let radiance_pyramid = (0..num_cascades + 1)
         .map(|level| {
             let grid = base_grid.shift(level);
             DEVICE.create_buffer::<f32>(grid.size() as usize)
@@ -191,9 +191,10 @@ fn main() {
         Axis::DirectionV,
     ];
 
-    let store = DEVICE.create_kernel::<fn(u32, Buffer<Fluence>, Mat3, Vec3<f32>)>(&track!(
-        |level, buffer, rotation, offset| {
+    let merge = DEVICE.create_kernel::<fn(u32, Mat3, Vec3<f32>, Buffer<f32>, Buffer<f32>)>(
+        &track!(|level, rotation, offset, buffer, next_buffer| {
             let grid = base_grid.expr().shift(level);
+
             let tracer = WorldMapper::<hrc::fluence::SingleF32, _> {
                 tracer: &voxel_tracer,
                 grid,
@@ -204,67 +205,21 @@ fn main() {
 
             let (cell, dir) = Axis::extract(
                 axes,
-                (grid.size, Vec2::splat_expr(grid.directions + 1)),
+                (grid.size, Vec2::splat_expr(grid.directions)),
                 dispatch_id().x,
             );
             let probe = Probe::expr(cell.cast_i32(), dir);
+            let trace = tracer.trace(probe);
 
-            let fluence = tracer.compute_ray(probe);
-
-            buffer.write(dispatch_id().x, fluence);
-        }
-    ));
-    let merge_up = DEVICE.create_kernel::<fn(u32, Buffer<Fluence>, Buffer<Fluence>)>(&track!(
-        |level, buffer, next_buffer| {
-            let grid = base_grid.expr().shift(level);
-            let next_grid = grid.next();
-
-            let (cell, dir) = Axis::extract(
+            let storage = BufferStorage {
                 axes,
-                (next_grid.size, Vec2::splat_expr(next_grid.directions + 1)),
-                dispatch_id().x,
-            );
-            let next_probe = Probe::expr(cell.cast_i32(), dir);
-            let storage = StorageTracer {
-                axes,
-                grid,
-                buffer,
-                next_buffer: next_buffer.clone(),
+                grid: grid.next(),
+                buffer: next_buffer,
             };
-            let fluence = merge_up(&storage, next_probe);
-            next_buffer.write(dispatch_id().x, fluence);
-        }
-    ));
-
-    let merge = DEVICE
-        .create_kernel::<fn(u32, Buffer<Fluence>, Buffer<Fluence>, Buffer<f32>, Buffer<f32>)>(
-            &track!(|level, ray_buffer, next_ray_buffer, buffer, next_buffer| {
-                let grid = base_grid.expr().shift(level);
-
-                let tracer = StorageTracer {
-                    axes,
-                    grid,
-                    buffer: ray_buffer,
-                    next_buffer: next_ray_buffer,
-                };
-
-                let (cell, dir) = Axis::extract(
-                    axes,
-                    (grid.size, Vec2::splat_expr(grid.directions)),
-                    dispatch_id().x,
-                );
-                let probe = Probe::expr(cell.cast_i32(), dir);
-                let trace = tracer.trace(probe);
-
-                let storage = BufferStorage {
-                    axes,
-                    grid: grid.next(),
-                    buffer: next_buffer,
-                };
-                let radiance = hrc::merge(grid, probe, trace, &storage);
-                BufferStorage { axes, grid, buffer }.store(probe, radiance);
-            }),
-        );
+            let radiance = hrc::merge(grid, probe, trace, &storage);
+            BufferStorage { axes, grid, buffer }.store(probe, radiance);
+        }),
+    );
     let copy_final = DEVICE.create_kernel::<fn(Mat3, Vec3<f32>)>(&track!(|rotation, offset| {
         let storage = BufferStorage {
             axes,
@@ -314,8 +269,7 @@ fn main() {
 
     println!(
         "Size: {:?}gb",
-        (radiance_pyramid.iter().map(|x| x.len()).sum::<usize>() * std::mem::size_of::<f32>()
-            + ray_pyramid.iter().map(|x| x.len()).sum::<usize>() * std::mem::size_of::<Fluence>())
+        (radiance_pyramid.iter().map(|x| x.len()).sum::<usize>() * std::mem::size_of::<f32>())
             as f32
             / (1024.0_f32).powi(3)
     );
@@ -323,32 +277,13 @@ fn main() {
     let start = std::time::Instant::now();
 
     for (rotation, offset, trace_offset) in transforms {
-        for level in 0..base_size.trailing_zeros() {
-            let mut grid = base_grid.shift(level);
-            grid.directions += 1;
-            if level <= 3 {
-                store.dispatch(
-                    [grid.size(), 1, 1],
-                    &level,
-                    &ray_pyramid[level as usize],
-                    &rotation,
-                    &trace_offset,
-                );
-            } else {
-                merge_up.dispatch(
-                    [grid.size(), 1, 1],
-                    &(level - 1),
-                    &ray_pyramid[(level - 1) as usize],
-                    &ray_pyramid[level as usize],
-                );
-            }
-        }
-        for level in (0..base_size.trailing_zeros() - 1).rev() {
+        for level in (0..num_cascades).rev() {
+            let grid = base_grid.shift(level);
             merge.dispatch(
-                [base_grid.shift(level).size(), 1, 1],
+                [grid.size(), 1, 1],
                 &level,
-                &ray_pyramid[level as usize],
-                &ray_pyramid[(level + 1) as usize],
+                &rotation,
+                &trace_offset,
                 &radiance_pyramid[level as usize],
                 &radiance_pyramid[(level + 1) as usize],
             );
@@ -387,7 +322,7 @@ fn main() {
                     |pos, last_t, next_t| {
                         let v = voxels.read(to_linear_expr(pos, Vec3::from(size)));
                         let color = color_palette.read(v.cast_u32());
-                        if (slice != 0 && pos.y == slice) || (slice == 0 && color.opacity > 5.0) {
+                        if (slice != 0 && pos.x == slice) || (slice == 0 && color.opacity > 5.0) {
                             *time = (last_t + next_t) / 2.0;
                             true.expr()
                         } else {
@@ -422,7 +357,7 @@ fn main() {
                             prev_voxel.clamp(0, size.expr().cast_i32() - 1).cast_u32(),
                             size,
                         ))
-                    }; //  + f16::from_f32(0.01);
+                    }; // + 0.01;
 
                 let color = voxels.read(to_linear_expr(world_voxel.cast_u32(), Vec3::from(size)));
                 // Vec3::splat_expr(num_ddas.cast_f32() * 0.1); // pcg3df(Vec3::expr(hit.inst, hit.prim, 1));
@@ -445,7 +380,7 @@ fn main() {
         screen_size: app.size().map(|x| x as f32).into(),
         yaw: 0.0,
         pitch: 0.0,
-        pos: Vec3::new(32.0, -64.0, 32.0),
+        pos: Vec3::new(64.0, -128.0, 64.0),
         fov: 0.9,
     };
 

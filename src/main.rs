@@ -52,10 +52,10 @@ use keter::rtx::SurfaceHit;
 use keter_testbed::{App, KeyCode};
 use yesod::camera::{Camera, View};
 use yesod::color::{inferno, plasma, reinhard};
-use yesod::device_println;
 use yesod::direction::{DirectionEncoder, SphericalEncoder};
-use yesod::printer::global::{PrintExt, flush_printer};
+use yesod::printer::global::flush_printer;
 use yesod::rand::{pcg3d, pcg3df};
+use yesod::{device_println, host};
 
 const TERMINATE_DEPOSIT: u32 = 0b1;
 // TODO: Probably should scale with distance
@@ -261,6 +261,8 @@ fn main() {
         + cache.nodes.len() * std::mem::size_of::<Node>();
     println!("Cache memory: {} MB", cache_memory / 1024 / 1024);
 
+    let cache_size = DEVICE.create_buffer::<u32>(cache.num_levels as usize);
+
     let decay_cache = DEVICE.create_kernel::<fn(u32)>(&track!(|level| {
         let node_index = dispatch_id().x + cache.get_node_offset(level);
         let node = cache.nodes.read(node_index).var();
@@ -296,6 +298,8 @@ fn main() {
                         .write(node.data_offset + index, Vec4::new(0.0, 0.0, 0.0, 0.00001));
                 }
             }
+        } else {
+            cache_size.atomic_ref(level).fetch_add(1_u32.expr());
         }
     }));
     let reset_tex2d = DEVICE.create_kernel::<fn(Tex2d<Vec4<f32>>)>(&track!(|tex| {
@@ -832,7 +836,7 @@ fn main() {
                             device_println!(
                                 "Probe at quality: {}",
                                 // probe.position.w.host(),
-                                quality.host()
+                                host!(quality)
                             );
                         }
                         inferno(quality_ratio)
@@ -879,7 +883,7 @@ fn main() {
                 let hit = world.trace(view.pos, ray_dir);
                 if (cursor_pixel == pixel).all() {
                     let inst = hit.inst;
-                    device_println!("Hit at {}", inst.host());
+                    device_println!("Hit at {}", host!(inst));
                 }
                 pcg3df(Vec3::expr(hit.inst, 37, 926))
             } else if mode == 7 {
@@ -918,6 +922,8 @@ fn main() {
     let mut blend_radius_mode = 0;
 
     let mut profiler = Profiler::new();
+
+    let v = vec![0_u32; cache.num_levels as usize];
 
     app.run(|rt| {
         let rot_speed = 1.5 * rt.frame_time();
@@ -966,8 +972,11 @@ fn main() {
                 println!("Num rays traced: {}", next_traced_ray.read_blocking());
             }
             commands.push(cache.set_view(camera.view()));
+
+            commands.push(cache_size.copy_from_async(&v).debug("Copy Cache Size"));
+
             for l in (0..cache.num_levels).rev() {
-                let dispatch_size = [cache.num_nodes_at_level(l), 1 << l, 1];
+                let dispatch_size = [cache.num_nodes_at_level(l), 1, 1];
                 commands.push(
                     decay_cache
                         .dispatch_async(dispatch_size, &l)
@@ -1078,6 +1087,8 @@ fn main() {
 
         profiler.record(commands.chain().execute_timed());
 
+        let cache_size = cache_size.copy_to_vec();
+
         if profiler.time() > 1000.0 {
             profiler.print(
                 &[
@@ -1090,6 +1101,13 @@ fn main() {
                     "Draw",
                 ],
                 true,
+            );
+            println!("Cache Sizes per Level: {:?}", cache_size);
+            println!(
+                "Max: {:?}",
+                (0..cache.num_levels)
+                    .map(|l| cache.num_nodes_at_level(l))
+                    .collect::<Vec<_>>()
             );
             profiler.reset();
         }

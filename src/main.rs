@@ -1023,7 +1023,7 @@ fn main() {
             );
 
             for l in (0..cache.num_levels).rev() {
-                let dispatch_size = [cache.num_nodes_at_level(l), 1 << l, 1];
+                let dispatch_size = [cache.num_nodes_at_level(l), 32 * (1 << l), 1];
                 commands.push(
                     (if l == cache.num_levels - 1 {
                         merge_last_cache.dispatch_async(dispatch_size)

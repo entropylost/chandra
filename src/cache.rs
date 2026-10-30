@@ -198,6 +198,8 @@ impl ProbeExpr {
 #[derive(Debug, Clone, Copy, Value, Default)]
 pub struct Projection {
     view_pos: Vec3<f32>,
+    // Added to the LOD index; raised when the probe table is close to full.
+    lod_bias: f32,
 }
 
 #[derive(Debug)]
@@ -246,9 +248,11 @@ impl HashCache {
             weights: DEVICE.create_buffer_from_fn(num_data, |_| 0.0),
         }
     }
-    pub fn set_view(&self, view: View) -> NodeConfigs<'static> {
-        self.projection
-            .write_host(Projection { view_pos: view.pos })
+    pub fn set_view(&self, view: View, lod_bias: f32) -> NodeConfigs<'static> {
+        self.projection.write_host(Projection {
+            view_pos: view.pos,
+            lod_bias,
+        })
     }
     pub fn total_probes(&self) -> u32 {
         self.table.data_capacity()
@@ -295,8 +299,9 @@ impl HashCache {
     }
     #[tracked]
     pub fn estimate_lod(&self, pos: Expr<Vec3<f32>>) -> Expr<u32> {
-        let radius = (pos - self.projection().view_pos).abs().reduce_max();
-        keter::max((radius / self.base_radius).log2(), 0.0)
+        let projection = self.projection();
+        let radius = (pos - projection.view_pos).abs().reduce_max();
+        keter::max((radius / self.base_radius).log2() + projection.lod_bias, 0.0)
             .ceil()
             .cast_u32()
     }
@@ -310,8 +315,12 @@ impl HashCache {
             // Don't do LODs
             f(self.estimate_lod(pos), 0.expr(), 1.0.expr());
         } else {
-            let radius = (pos - self.projection().view_pos).abs().reduce_max();
-            let lod_index = keter::max((radius / self.base_radius).log2(), -0.9);
+            let projection = self.projection();
+            let radius = (pos - projection.view_pos).abs().reduce_max();
+            let lod_index = keter::max(
+                (radius / self.base_radius).log2() + projection.lod_bias,
+                -0.9,
+            );
             let blending_factor =
                 keter::min(1.0, (1.0 - lod_index.fract()) / self.blending_radius.log2());
             let lower_lod = lod_index.ceil().cast_u32();

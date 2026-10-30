@@ -404,7 +404,7 @@ fn main() {
             if mode == 5 {
                 println!("Num rays traced: {}", trace.next_traced_ray.read_blocking());
             }
-            commands += rc.cache.set_view(camera.view());
+            commands += rc.cache.set_view(camera.view(), rc.lod_bias);
 
             // add c0 probes
             commands += rc.init_probes_base(&core);
@@ -423,7 +423,7 @@ fn main() {
             }
 
             rc.reset_table(&mut commands, false);
-
+            rc.update_lod_bias();
             commands += rc.compute_average_position(&core);
 
             if normal_rc {

@@ -73,6 +73,9 @@ pub struct RcData {
     // not really used. might be worth handling.
     pub num_probes: Vec<u32>,
     pub max_probes: Vec<u32>,
+    // Coarsens probe LODs when the table is near capacity, so overflow degrades resolution
+    // instead of leaving pixels without probes. Updated from `num_probes` each frame.
+    pub lod_bias: f32,
 
     pub config: RcConfig,
 }
@@ -148,8 +151,23 @@ impl RcData {
                 .create_buffer_from_fn(cache.total_probes() as usize, |_| Default::default()),
             num_probes: vec![0; cache.num_cascades as usize],
             max_probes: vec![0; cache.num_cascades as usize],
+            lod_bias: 0.0,
             cache,
             config,
+        }
+    }
+    // Call after `reset_table`. One LOD step quarters the surface probe count, so small
+    // steps with hysteresis keep the occupancy in band without visibly popping.
+    pub fn update_lod_bias(&mut self) {
+        const HIGH_WATER: f32 = 0.85;
+        const LOW_WATER: f32 = 0.6;
+        let pressure = (0..self.cache.num_cascades)
+            .map(|c| self.num_probes[c as usize] as f32 / self.cache.max_probes_at_cascade(c) as f32)
+            .fold(0.0, f32::max);
+        if pressure > HIGH_WATER {
+            self.lod_bias += 0.05;
+        } else if pressure < LOW_WATER {
+            self.lod_bias = (self.lod_bias - 0.01).max(0.0);
         }
     }
     pub fn last_cascade(&self) -> u32 {

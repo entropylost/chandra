@@ -561,7 +561,9 @@ impl RcData {
                     let probe = self.cache.quantize(world_pos, lod, 0.expr());
 
                     let node = self.cache.get(probe);
-                    self.probe_lifetime.write(node.index, self.max_lifetime);
+                    if node.loaded() {
+                        self.probe_lifetime.write(node.index, self.max_lifetime);
+                    }
                 });
             }))
         })
@@ -581,6 +583,9 @@ impl RcData {
                 let probe = self.cache.quantize(world_pos, lod, 0.expr());
 
                 let node = self.cache.get(probe);
+                if node.invalid() {
+                    return;
+                }
                 self.probe_lifetime
                     .write(node.index, self.secondary_lifetime);
             }))
@@ -599,6 +604,9 @@ impl RcData {
                 let probe = self.cache.decode(key, cascade);
                 let node = self.cache.load_index(probe, index);
                 let next = self.cache.get(probe.next_nearest());
+                if next.invalid() {
+                    return;
+                }
                 self.probe_lifetime
                     .atomic_ref(next.index)
                     .fetch_max(self.probe_lifetime.read(node.index));
@@ -629,9 +637,11 @@ impl RcData {
                         let probe = self.cache.quantize(world_pos, lod, cascade);
                         let node = self.cache.get(probe);
 
-                        self.average_position
-                            .atomic_ref(node.index)
-                            .add_sample(world_pos);
+                        if node.loaded() {
+                            self.average_position
+                                .atomic_ref(node.index)
+                                .add_sample(world_pos);
+                        }
                     });
                 }),
                 [

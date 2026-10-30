@@ -43,6 +43,7 @@ pub struct HashTable {
     pub data_key: Buffer<Key>,
     // per table
     pub table_data_start: Buffer<u32>,
+    pub table_data_end: Buffer<u32>,
     pub freelist_index: Buffer<u32>, // reset to table_data_start after each build
     pub last_occupied_index: Buffer<u32>,
     pub total_occupied: Buffer<u32>,
@@ -65,10 +66,12 @@ impl HashTable {
     ) -> Self {
         let total_entry_capacity = entry_capacity * num_tables;
         let mut table_data_start = Vec::new();
+        let mut table_data_end = Vec::new();
         let mut total_data_capacity = 0;
         for cap in data_capacities {
             table_data_start.push(total_data_capacity);
             total_data_capacity += cap;
+            table_data_end.push(total_data_capacity);
         }
         assert_eq!(table_data_start.len() as u32, num_tables);
         Self {
@@ -81,6 +84,7 @@ impl HashTable {
             data_key: DEVICE.create_buffer_from_fn(total_data_capacity as usize, |_| INVALID_KEY),
 
             table_data_start: DEVICE.create_buffer_from_slice(&table_data_start),
+            table_data_end: DEVICE.create_buffer_from_slice(&table_data_end),
             freelist_index: DEVICE.create_buffer(num_tables as usize),
             last_occupied_index: DEVICE.create_buffer(num_tables as usize),
             total_occupied: DEVICE.create_buffer(num_tables as usize),
@@ -134,9 +138,15 @@ impl HashTable {
                 // already inserted, do nothing
                 break;
             } else if prev == INVALID_KEY {
-                let index = self
-                    .freelist
-                    .read(self.freelist_index.atomic_ref(table).fetch_add(1));
+                let freelist_index = self.freelist_index.atomic_ref(table).fetch_add(1);
+                // Free slots are [start, end - occupied); past that the table is full, so
+                // leave the entry unloaded (index u32::MAX) rather than stealing another table's slots.
+                let free_end =
+                    self.table_data_end.read(table) - self.total_occupied.read(table);
+                if freelist_index >= free_end {
+                    break;
+                }
+                let index = self.freelist.read(freelist_index);
                 entry.value.index.exchange(index);
                 self.data_key.write(index, key);
                 on_insert(index);

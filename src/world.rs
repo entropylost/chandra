@@ -1,4 +1,3 @@
-use std::f32;
 use std::fmt::Debug;
 use std::mem::forget;
 use std::path::Path;
@@ -10,7 +9,7 @@ use keter::lang::types::vector::{Mat3, Mat4, Vec2, Vec3, Vec4};
 use keter::prelude::*;
 use keter::rtx::{
     Aabb, Accel, AccelBuildRequest, AccelOption, AccelTraceOptions, AccelUsageHint, CommittedHit,
-    Ray, SurfaceHit, TriangleInterpolate,
+    Ray, SurfaceHit,
 };
 use tobj::LoadOptions;
 use yesod::shapes::dda;
@@ -119,7 +118,7 @@ impl TriangleWorld {
         };
 
         let mut positions: Vec<[f32; 3]> = vec![];
-        let mut normals: Vec<[f32; 3]> = vec![];
+        // let mut normals: Vec<[f32; 3]> = vec![];
         let mut indices: Vec<[u32; 3]> = vec![];
         let mut offsets: Vec<[u32; 2]> = vec![];
 

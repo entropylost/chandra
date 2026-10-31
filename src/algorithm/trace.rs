@@ -1,6 +1,5 @@
 use yesod::direction::project_line;
 use yesod::rand::{pcg3df, r2};
-use yesod::utils::dispatch2;
 
 use super::*;
 use crate::algorithm::rc::{Ray, RayComps, RcData};

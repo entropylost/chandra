@@ -40,7 +40,6 @@ use chandra::algorithm::rc::RcData;
 use chandra::algorithm::splat::SplatData;
 use chandra::algorithm::trace::TraceData;
 use chandra::algorithm::{CommandList, CoreData};
-use chandra::cache::{DirectionIndexer, DirectionIndexerComps};
 use chandra::scene::Scene;
 use chandra::utils::sample_bounce;
 use keter::graph::profile::Profiler;

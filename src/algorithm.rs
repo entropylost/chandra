@@ -1,11 +1,12 @@
 use std::ops::AddAssign;
+use std::path::PathBuf;
 
-use image::Rgb32FImage;
 use keter::bindless::{BINDLESS, Tex2dHandle};
 use keter::graph::NodeConfigs;
 use keter::lang::types::shared::Shared;
 use keter::lang::types::vector::{Vec2, Vec3, Vec4};
 use keter::prelude::*;
+use serde::Deserialize;
 use yesod::camera::View;
 use yesod::device_println;
 use yesod::direction::{DirectionEncoder, EquirectangularEncoder, SphericalEncoder};
@@ -24,13 +25,35 @@ type World = crate::world::VoxelWorld;
 #[cfg(feature = "voxel")]
 type Hit = keter::rtx::CommittedHit;
 
+// Z-up to Y-up
+fn default_transform() -> glam::Mat3 {
+    glam::Mat3::from_cols_array(&[0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0])
+}
+
+fn default_scale() -> f32 {
+    1.0
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TriangleWorldData {
+    pub path: PathBuf,
+    #[serde(default = "default_transform")]
+    pub transform: glam::Mat3,
+    #[serde(default = "default_scale")]
+    pub scale: f32,
+    #[serde(default)]
+    pub material_override: Option<glam::Vec3>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct WorldData {
-    pub world: World,
-    pub envmap: Rgb32FImage,
+    pub world: TriangleWorldData,
+    pub envmap: PathBuf,
     pub envmap_scale: f32,
-    pub sun_dir: Vec3<f32>,
-    pub sun_color: Vec3<f32>,
-    pub custom_emitters: Vec<(u32, Vec3<f32>)>,
+    pub sun_dir: glam::Vec3,
+    pub sun_color: glam::Vec3,
+    #[serde(default)]
+    pub custom_emitters: Vec<(u32, glam::Vec3)>,
 }
 
 pub struct CoreData {
@@ -58,6 +81,24 @@ impl CoreData {
             custom_emitters,
         }: WorldData,
     ) -> Self {
+        #[cfg(not(feature = "voxel"))]
+        let world = World::load(
+            &world.path,
+            world.transform * world.scale,
+            world.material_override.map(Into::into),
+        );
+        #[cfg(feature = "voxel")]
+        let world = World::load(world.path.to_str().unwrap());
+        let envmap = image::open(&envmap)
+            .unwrap_or_else(|e| panic!("Failed to load envmap {}: {e}", envmap.display()))
+            .to_rgb32f();
+        let sun_dir = sun_dir.normalize().into();
+        let sun_color = sun_color.into();
+        let custom_emitters = custom_emitters
+            .into_iter()
+            .map(|(i, color)| (i, color.into()))
+            .collect();
+
         let depth = DEVICE.create_tex2d::<f32>(PixelStorage::Float1, width, height, 1);
         let depth = BINDLESS.push_tex2d(
             depth,

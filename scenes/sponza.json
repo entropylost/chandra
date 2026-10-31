@@ -1,0 +1,27 @@
+{
+    "world": {
+        "world": {
+            "path": "assets/sponza.obj",
+            "material_override": [0.7, 0.7, 0.7]
+        },
+        "envmap": "assets/qwantani_dusk_2_4k.exr",
+        "envmap_scale": 1.0,
+        "sun_dir": [0.1, 0.5, 1.0],
+        "sun_color": [10.0, 10.0, 10.0],
+        "custom_emitters": [
+            [1, [10.0, 0.0, 0.0]],
+            [9, [0.0, 7.0, 7.0]]
+        ]
+    },
+    "rc_config": {
+        "base_grid_size": 6.0,
+        "base_probes": 131072
+    },
+    "ddgi_bounds": [[-700.0, -1600.0, -10.0], [700.0, 1300.0, 900.0]],
+    "ddgi_probe_dims": [32, 32, 16],
+    "camera": {
+        "yaw": 6.437008,
+        "pitch": 0.47492924,
+        "pos": [-94.45221, -937.2442, 613.4341]
+    }
+}

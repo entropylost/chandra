@@ -1,0 +1,22 @@
+{
+    "world": {
+        "world": {
+            "path": "assets/conference.obj"
+        },
+        "envmap": "assets/qwantani_dusk_2_4k.exr",
+        "envmap_scale": 0.0,
+        "sun_dir": [0.1, 0.6, 1.0],
+        "sun_color": [0.0, 0.0, 0.0]
+    },
+    "rc_config": {
+        "base_grid_size": 4.0,
+        "base_probes": 524288
+    },
+    "ddgi_bounds": [[-600.0, -300.0, -100.0], [1500.0, 3000.0, 1281.0]],
+    "ddgi_probe_dims": [32, 48, 32],
+    "camera": {
+        "yaw": 2.3309836,
+        "pitch": 0.3910516,
+        "pos": [-811.98444, 1273.2661, 560.3888]
+    }
+}

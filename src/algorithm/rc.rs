@@ -5,13 +5,15 @@ use keter::lang::functions::{
     sync_block, thread_id, warp_active_count_bits, warp_prefix_count_bits, warp_read_lane_at,
 };
 use parking_lot::Mutex;
+use serde::Deserialize;
 use yesod::utils::FetchAddVector;
 
 use super::*;
 use crate::algorithm::trace::TraceData;
 use crate::cache::{Fluence, HashCache, LoadedNode, ProbeComps, Radiance};
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(default)]
 pub struct RcConfig {
     pub base_grid_size: f32,
     pub base_radius: f32,

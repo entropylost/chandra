@@ -5,5 +5,7 @@ pub mod world;
 
 pub mod algorithm;
 
+pub mod scene;
+
 #[cfg(feature = "denoise")]
 pub mod denoise;

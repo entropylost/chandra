@@ -27,6 +27,17 @@ pub struct TriangleWorld {
     pub material_indices: Buffer<u32>,
     pub material_diffuse: Buffer<Vec3<f32>>,
 }
+impl Debug for TriangleWorld {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TriangleWorld")
+            .field("positions", &self.positions)
+            .field("indices", &self.indices)
+            .field("offsets", &self.offsets)
+            .field("material_indices", &self.material_indices)
+            .field("material_diffuse", &self.material_diffuse)
+            .finish_non_exhaustive()
+    }
+}
 impl TriangleWorld {
     pub fn new(
         positions: &[[f32; 3]],
@@ -84,7 +95,7 @@ impl TriangleWorld {
     }
     pub fn load(
         path: impl AsRef<Path> + Debug,
-        rotation: glam::Mat3,
+        transform: glam::Mat3,
         material_override: Option<Vec3<f32>>,
     ) -> Self {
         let (models, materials) = tobj::load_obj(
@@ -124,7 +135,7 @@ impl TriangleWorld {
             positions.extend(
                 bytemuck::cast_slice::<_, [f32; 3]>(&mesh.positions)
                     .iter()
-                    .map(|&p| <[f32; 3]>::from(rotation * glam::Vec3::from(p))),
+                    .map(|&p| <[f32; 3]>::from(transform * glam::Vec3::from(p))),
             ); // Z-up to Y-up
             //  normals.extend(bytemuck::cast_slice(&mesh.normals));
             indices.extend(bytemuck::cast_slice(&mesh.indices));

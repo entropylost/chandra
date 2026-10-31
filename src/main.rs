@@ -26,19 +26,23 @@ BUGS:
 Split into two caches. Also measure ray divergence and use that to stochastically reduce ray count.
 */
 
+/*
+refactors:
+have the AI copy stuff to render
+create json for scene configuration (so it can be shared easier)
+
+*/
+
 use std::f32::consts::PI;
-use std::path::Path;
 
 use chandra::algorithm::ddgi::{DdgiConfig, DdgiData};
-use chandra::algorithm::rc::{RcConfig, RcData};
+use chandra::algorithm::rc::RcData;
 use chandra::algorithm::splat::SplatData;
 use chandra::algorithm::trace::TraceData;
-use chandra::algorithm::{CommandList, CoreData, WorldData};
+use chandra::algorithm::{CommandList, CoreData};
 use chandra::cache::{DirectionIndexer, DirectionIndexerComps};
+use chandra::scene::Scene;
 use chandra::utils::sample_bounce;
-use chandra::world::TriangleWorld;
-use glam::Mat3 as FMat3;
-use image::Rgb32FImage;
 use keter::graph::profile::Profiler;
 use keter::lang::types::vector::{Vec2, Vec3, Vec4};
 use keter::prelude::*;
@@ -55,160 +59,6 @@ const DEBUG_SPLATS: u32 = 0b1;
 const DRAW_SPECULAR: u32 = 0b10;
 const DRAW_DIFFUSE: u32 = 0b100;
 
-fn load_envmap(path: impl AsRef<Path>) -> Rgb32FImage {
-    image::open(path).unwrap().to_rgb32f()
-}
-
-struct Scene {
-    world: WorldData,
-    rc_config: RcConfig,
-    ddgi_bounds: (glam::Vec3, glam::Vec3),
-    ddgi_probe_dims: glam::UVec3,
-
-    camera_yaw: f32,
-    camera_pitch: f32,
-    camera_pos: glam::Vec3,
-}
-impl Scene {
-    fn sponza_main() -> Self {
-        Self {
-            world: WorldData {
-                world: TriangleWorld::load(
-                    "assets/sponza.obj",
-                    FMat3::from_cols_array(&[0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0]),
-                    Some(Vec3::splat(0.7)),
-                ),
-                envmap: load_envmap("assets/qwantani_dusk_2_4k.exr"),
-                envmap_scale: 1.0,
-                sun_dir: glam::Vec3::new(0.1, 0.5, 1.0).normalize().into(),
-                sun_color: Vec3::splat(10.0),
-                custom_emitters: vec![
-                    (1, Vec3::new(10.0, 0.0, 0.0)),
-                    (9, Vec3::new(0.0, 7.0, 7.0)),
-                ],
-            },
-            rc_config: RcConfig {
-                // base_grid_size: 11.0,
-                // base_probes: 1 << 16,
-                base_grid_size: 6.0,
-                base_probes: 1 << 17,
-                ..Default::default()
-            },
-            ddgi_bounds: (
-                glam::Vec3::new(-700.0, -1600.0, -10.0),
-                glam::Vec3::new(700.0, 1300.0, 900.0),
-            ),
-            ddgi_probe_dims: glam::UVec3::new(32, 32, 16),
-
-            camera_yaw: 6.437008,
-            camera_pitch: 0.47492924,
-            camera_pos: glam::Vec3::new(-94.45221, -937.2442, 613.4341),
-        }
-    }
-    fn sponza_penumbra() -> Self {
-        Self {
-            camera_yaw: 9.474376,
-            camera_pitch: 1.1788585,
-            camera_pos: glam::Vec3::new(-61.073547, 1171.4944, 375.83527),
-            ..Self::sponza_main()
-        }
-    }
-    fn sanmiguel_teaser() -> Self {
-        Self {
-            world: WorldData {
-                world: TriangleWorld::load(
-                    "assets/san-miguel-colored.obj",
-                    FMat3::from_cols_array(&[0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0]) * 100.0,
-                    None,
-                ),
-                envmap: load_envmap("assets/qwantani_dusk_2_4k.exr"),
-                envmap_scale: 0.5,
-                sun_dir: glam::Vec3::new(0.1, 2.0, 1.0).normalize().into(),
-                sun_color: Vec3::splat(30.0),
-                custom_emitters: vec![],
-            },
-            rc_config: RcConfig {
-                // base_grid_size: 12.0,
-                // base_probes: 1 << 16,
-                base_grid_size: 8.0,
-                base_probes: 1 << 18,
-                use_quality_weight: true,
-                blending_radius: 1.3,
-                ..Default::default()
-            },
-            ddgi_bounds: (
-                glam::Vec3::new(-600.0, -300.0, -100.0),
-                glam::Vec3::new(1500.0, 3000.0, 1281.0),
-            ),
-            ddgi_probe_dims: glam::UVec3::new(32, 48, 32),
-            camera_yaw: 10.387859,
-            camera_pitch: 0.70613384,
-            camera_pos: glam::Vec3::new(351.25754, 2183.237, 802.5459),
-        }
-    }
-    fn sanmiguel_alt() -> Self {
-        Self {
-            world: WorldData {
-                world: TriangleWorld::load(
-                    "assets/san-miguel-colored.obj",
-                    FMat3::from_cols_array(&[0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0]) * 100.0,
-                    None,
-                ),
-                envmap: load_envmap("assets/qwantani_dusk_2_4k.exr"),
-                envmap_scale: 1.0,
-                sun_dir: glam::Vec3::new(0.1, 0.6, 1.0).normalize().into(),
-                sun_color: Vec3::splat(10.0),
-                custom_emitters: vec![],
-            },
-            rc_config: RcConfig {
-                // base_grid_size: 8.0,
-                // base_probes: 1 << 16,
-                base_grid_size: 4.0,
-                base_probes: 1 << 18,
-                ..Default::default()
-            },
-            ddgi_bounds: (
-                glam::Vec3::new(-600.0, -300.0, -100.0),
-                glam::Vec3::new(1500.0, 3000.0, 1281.0),
-            ),
-            ddgi_probe_dims: glam::UVec3::new(32, 48, 32),
-            camera_yaw: 4.182359,
-            camera_pitch: 0.36102834,
-            camera_pos: glam::Vec3::new(136.32507, 1907.1962, 244.39528),
-        }
-    }
-    fn conference() -> Self {
-        Self {
-            world: WorldData {
-                world: TriangleWorld::load(
-                    "assets/conference.obj",
-                    FMat3::from_cols_array(&[0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0]),
-                    None,
-                ),
-                envmap: load_envmap("assets/qwantani_dusk_2_4k.exr"),
-                envmap_scale: 0.0,
-                sun_dir: glam::Vec3::new(0.1, 0.6, 1.0).normalize().into(),
-                sun_color: Vec3::splat(0.0),
-                custom_emitters: vec![],
-            },
-            rc_config: RcConfig {
-                base_grid_size: 4.0,
-                base_probes: 1 << 19,
-                ..Default::default()
-            },
-            ddgi_bounds: (
-                glam::Vec3::new(-600.0, -300.0, -100.0),
-                glam::Vec3::new(1500.0, 3000.0, 1281.0),
-            ),
-            ddgi_probe_dims: glam::UVec3::new(32, 48, 32),
-
-            camera_yaw: 2.3309836,
-            camera_pitch: 0.3910516,
-            camera_pos: glam::Vec3::new(-811.98444, 1273.2661, 560.3888),
-        }
-    }
-}
-
 // do sudo nvidia-smi --lock-gpu-clocks=405,1500 before running to make it have fixed time.
 // nvidia-smi -q -d SUPPORTED_CLOCKS
 fn main() {
@@ -220,7 +70,7 @@ fn main() {
 
     yesod::printer::global::set_capacity(1024 * 1024);
 
-    let scene = Scene::sanmiguel_alt();
+    let scene = Scene::load_file("scenes/sanmiguel_alt.json");
 
     let core = CoreData::new(app.size(), scene.world);
     let mut rc = RcData::new(scene.rc_config);
@@ -456,9 +306,9 @@ fn main() {
 
     let mut camera = Camera {
         screen_size: app.size().map(|x| x as f32).into(),
-        yaw: scene.camera_yaw,
-        pitch: scene.camera_pitch,
-        pos: scene.camera_pos,
+        yaw: scene.camera.yaw,
+        pitch: scene.camera.pitch,
+        pos: scene.camera.pos,
         fov: 1.15,
     };
     let mut running = true;

@@ -1,0 +1,25 @@
+{
+    "world": {
+        "world": {
+            "path": "assets/san-miguel-colored.obj",
+            "scale": 100.0
+        },
+        "envmap": "assets/qwantani_dusk_2_4k.exr",
+        "envmap_scale": 0.5,
+        "sun_dir": [0.1, 2.0, 1.0],
+        "sun_color": [30.0, 30.0, 30.0]
+    },
+    "rc_config": {
+        "base_grid_size": 8.0,
+        "base_probes": 262144,
+        "use_quality_weight": true,
+        "blending_radius": 1.3
+    },
+    "ddgi_bounds": [[-600.0, -300.0, -100.0], [1500.0, 3000.0, 1281.0]],
+    "ddgi_probe_dims": [32, 48, 32],
+    "camera": {
+        "yaw": 10.387859,
+        "pitch": 0.70613384,
+        "pos": [351.25754, 2183.237, 802.5459]
+    }
+}

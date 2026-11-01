@@ -1,4 +1,4 @@
-use keter::lang::functions::{block_id, sync_block, thread_id, warp_active_sum, warp_read_lane_at};
+use keter::lang::functions::{block_id, sync_block, thread_id, warp_read_lane_at};
 use yesod::color::inferno;
 use yesod::direction::OctahedralEncoder;
 use yesod::shapes::intersect_sphere;
@@ -54,7 +54,6 @@ impl SplatData {
     fn irradiance_size(&self) -> u32 {
         self.irradiance_resolution + 2
     }
-    // could switch to gather instead.
     pub fn calculate_irradiance(&self, rc: &RcData) -> NodeConfigs<'static> {
         dispatch0(
             track!(|| {
@@ -67,6 +66,11 @@ impl SplatData {
                     return;
                 }
 
+                // Each thread loads a direction of the probe, then gathers texels of the irradiance map from all
+                // the directions, which takes fewer instructions than summing every texel across the warp.
+                let radiances = Shared::<Vec4<f32>>::new(32);
+                let dirs = Shared::<Vec4<f32>>::new(32);
+
                 let radiance = rc.base_radiance.read(node.data_offset + dispatch_id().y);
                 let radiance = if radiance.is_finite().all() {
                     radiance.extend(1.0)
@@ -77,29 +81,31 @@ impl SplatData {
                     .cache
                     .get_encoder(0.expr())
                     .linear_to_dir(dispatch_id().y);
+                radiances.write(dispatch_id().y, radiance);
+                dirs.write(dispatch_id().y, dir.extend(0.0));
+                sync_block();
 
-                for index in 0..self.irradiance_resolution.pow(2) {
-                    let index = Vec2::expr(
-                        index % self.irradiance_resolution,
-                        index / self.irradiance_resolution,
-                    );
-                    let offset = (index.cast_f32() + 0.5) / self.irradiance_resolution as f32;
-                    let out_dir = OctahedralEncoder::decode(offset);
-                    let weight = keter::max(out_dir.dot(dir), 0.0);
-                    let deposit = radiance * weight;
-                    let deposit = Vec4::expr(
-                        warp_active_sum(deposit.x),
-                        warp_active_sum(deposit.y),
-                        warp_active_sum(deposit.z),
-                        warp_active_sum(deposit.w),
-                    );
-                    if dispatch_id().y == 0 {
-                        let tile = Vec2::expr(
-                            dispatch_id().x % self.irradiance_dims.x,
-                            dispatch_id().x / self.irradiance_dims.x,
+                let tile = Vec2::expr(
+                    dispatch_id().x % self.irradiance_dims.x,
+                    dispatch_id().x / self.irradiance_dims.x,
+                );
+                let texels = self.irradiance_resolution.pow(2);
+                for pass in 0..texels.div_ceil(32) {
+                    let index = dispatch_id().y + pass * 32;
+                    if index < texels {
+                        let index = Vec2::expr(
+                            index % self.irradiance_resolution,
+                            index / self.irradiance_resolution,
                         );
+                        let offset = (index.cast_f32() + 0.5) / self.irradiance_resolution as f32;
+                        let out_dir = OctahedralEncoder::decode(offset);
+                        let total = Vec4::splat(0.0_f32).var();
+                        for i in 0..32_u32 {
+                            let weight = keter::max(out_dir.dot(dirs.read(i).xyz()), 0.0);
+                            *total += radiances.read(i) * weight;
+                        }
                         let uv = tile * self.irradiance_size() + index + 1;
-                        self.irradiance.write(uv, deposit);
+                        self.irradiance.write(uv, **total);
                     }
                 }
             }),

@@ -241,7 +241,7 @@ impl HashCache {
 
             table: HashTable::new(
                 num_cascades,
-                base_probes * 4, // Can use an overly large amount to reduce collisions.
+                4, // Entries per probe. Can use an overly large amount to reduce collisions.
                 (0..num_cascades).map(|level| base_probes >> (level * 2)),
             ),
             weighted_fluence: DEVICE.create_buffer_from_fn(num_data, |_| Vec4::splat(0.0)),

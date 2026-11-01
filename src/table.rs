@@ -34,7 +34,9 @@ impl Entry {
 #[derive(Debug)]
 pub struct HashTable {
     pub num_tables: u32,
-    pub entry_capacity: u32,
+    pub entries_per_datum: u32,
+    // whether every table has a power of two of entries, so that indices wrap with a mask
+    pub power_of_two: bool,
     pub data_capacity: u32,
     // per entry
     pub entries: Buffer<Entry>,
@@ -44,6 +46,8 @@ pub struct HashTable {
     // per table
     pub table_data_start: Buffer<u32>,
     pub table_data_end: Buffer<u32>,
+    // per table, and the total at the end
+    pub table_entry_start: Buffer<u32>,
     pub freelist_index: Buffer<u32>, // reset to table_data_start after each build
     pub last_occupied_index: Buffer<u32>,
     pub total_occupied: Buffer<u32>,
@@ -59,24 +63,31 @@ update:
 - perform queries
 */
 impl HashTable {
+    // Each table has `entries_per_datum` entries per item of data it can hold.
     pub fn new(
         num_tables: u32,
-        entry_capacity: u32,
+        entries_per_datum: u32,
         data_capacities: impl Iterator<Item = u32>,
     ) -> Self {
-        let total_entry_capacity = entry_capacity * num_tables;
         let mut table_data_start = Vec::new();
         let mut table_data_end = Vec::new();
+        let mut table_entry_start = Vec::new();
         let mut total_data_capacity = 0;
+        let mut power_of_two = true;
         for cap in data_capacities {
             table_data_start.push(total_data_capacity);
+            table_entry_start.push(total_data_capacity * entries_per_datum);
             total_data_capacity += cap;
             table_data_end.push(total_data_capacity);
+            power_of_two &= (cap * entries_per_datum).is_power_of_two();
         }
         assert_eq!(table_data_start.len() as u32, num_tables);
+        let total_entry_capacity = total_data_capacity * entries_per_datum;
+        table_entry_start.push(total_entry_capacity);
         Self {
             num_tables,
-            entry_capacity,
+            entries_per_datum,
+            power_of_two,
             data_capacity: total_data_capacity,
 
             entries: DEVICE.create_buffer_from_fn(total_entry_capacity as usize, |_| Entry::EMPTY),
@@ -85,6 +96,7 @@ impl HashTable {
 
             table_data_start: DEVICE.create_buffer_from_slice(&table_data_start),
             table_data_end: DEVICE.create_buffer_from_slice(&table_data_end),
+            table_entry_start: DEVICE.create_buffer_from_slice(&table_entry_start),
             freelist_index: DEVICE.create_buffer(num_tables as usize),
             last_occupied_index: DEVICE.create_buffer(num_tables as usize),
             total_occupied: DEVICE.create_buffer(num_tables as usize),
@@ -95,6 +107,7 @@ impl HashTable {
             + self.freelist.size_bytes()
             + self.data_key.size_bytes()
             + self.table_data_start.size_bytes()
+            + self.table_entry_start.size_bytes()
             + self.freelist_index.size_bytes()
             + self.last_occupied_index.size_bytes()
     }
@@ -102,15 +115,30 @@ impl HashTable {
         self.data_capacity
     }
     pub fn entry_capacity(&self) -> u32 {
-        self.entry_capacity
+        self.entries.len() as u32
     }
     fn probing_step(&self) -> u32 {
         1 // (GOLDEN_RATIO * self.entry_capacity as f32) as u32
     }
+    // The first entry of a table and its number of entries.
+    #[tracked]
+    fn entry_range(&self, table: Expr<u32>) -> (Expr<u32>, Expr<u32>) {
+        let offset = self.table_entry_start.read(table);
+        (offset, self.table_entry_start.read(table + 1) - offset)
+    }
+    // An index modulo the number of entries of a table.
+    #[tracked]
+    fn wrap(&self, index: Expr<u32>, capacity: Expr<u32>) -> Expr<u32> {
+        if self.power_of_two {
+            index & (capacity - 1)
+        } else {
+            index % capacity
+        }
+    }
     #[tracked]
     fn insert_entry_index(&self, key: Expr<Key>, table: Expr<u32>, index: Expr<u32>) {
-        let entry_index = (hash(key) % self.entry_capacity).var();
-        let offset = self.entry_capacity * table;
+        let (offset, capacity) = self.entry_range(table);
+        let entry_index = self.wrap(hash(key), capacity).var();
         loop {
             let entry = self.entries.atomic_ref(entry_index + offset);
             let prev = entry.key.compare_exchange(INVALID_KEY, key);
@@ -123,14 +151,14 @@ impl HashTable {
                 break;
             }
 
-            *entry_index = (entry_index + self.probing_step()) % self.entry_capacity;
+            *entry_index = self.wrap(entry_index + self.probing_step(), capacity);
         }
     }
     // Inserts a key into the table. It takes a while to get the index, so that has to be done later after synchronization.
     #[tracked]
     pub fn insert(&self, key: Expr<Key>, table: Expr<u32>, on_insert: impl Fn(Expr<u32>)) {
-        let entry_index = (hash(key) % self.entry_capacity).var();
-        let offset = self.entry_capacity * table;
+        let (offset, capacity) = self.entry_range(table);
+        let entry_index = self.wrap(hash(key), capacity).var();
         loop {
             let entry = self.entries.atomic_ref(offset + entry_index);
             let prev = entry.key.compare_exchange(INVALID_KEY, key);
@@ -152,13 +180,13 @@ impl HashTable {
                 on_insert(index);
                 break;
             }
-            *entry_index = (entry_index + self.probing_step()) % self.entry_capacity;
+            *entry_index = self.wrap(entry_index + self.probing_step(), capacity);
         }
     }
     #[tracked]
     pub fn get(&self, key: Expr<Key>, table: Expr<u32>) -> Expr<u32> {
-        let entry_index = (hash(key) % self.entry_capacity).var();
-        let offset = self.entry_capacity * table;
+        let (offset, capacity) = self.entry_range(table);
+        let entry_index = self.wrap(hash(key), capacity).var();
         let result = u32::MAX.var();
         loop {
             let entry = self.entries.read(offset + entry_index);
@@ -168,7 +196,7 @@ impl HashTable {
             } else if entry.key == INVALID_KEY {
                 break;
             }
-            *entry_index = (entry_index + self.probing_step()) % self.entry_capacity;
+            *entry_index = self.wrap(entry_index + self.probing_step(), capacity);
         }
         **result
     }
@@ -178,8 +206,8 @@ impl HashTable {
     }
     #[tracked]
     pub fn cost(&self, key: Expr<Key>, table: Expr<u32>) -> Expr<u32> {
-        let entry_index = (hash(key) % self.entry_capacity).var();
-        let offset = self.entry_capacity * table;
+        let (offset, capacity) = self.entry_range(table);
+        let entry_index = self.wrap(hash(key), capacity).var();
         let cost = 0_u32.var();
         loop {
             let entry = self.entries.read(offset + entry_index);
@@ -189,7 +217,7 @@ impl HashTable {
                 *cost = u32::MAX;
                 break;
             }
-            *entry_index = (entry_index + self.probing_step()) % self.entry_capacity;
+            *entry_index = self.wrap(entry_index + self.probing_step(), capacity);
             *cost += 1;
         }
         **cost

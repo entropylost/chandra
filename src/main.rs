@@ -575,7 +575,11 @@ fn main() {
 
             rc.reset_table(&mut commands, false);
             rc.update_lod_bias();
-            commands += rc.compute_average_position(&core);
+
+            // the average probe positions are only read by normal RC and the splat depth prepass
+            if normal_rc || splat_mode == 2 {
+                commands += rc.compute_average_position(&core);
+            }
 
             if normal_rc {
                 for c in 0..num_cascades {

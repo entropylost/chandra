@@ -490,7 +490,6 @@ fn main() {
                 && rc.cm1_len == 0.0
             {
                 commands += splat.calculate_irradiance(&rc);
-                commands += splat.copy_irradiance_borders(&rc);
                 commands += splat.shade_optimized_32(&core, &rc);
             } else {
                 let blend_radius = match splat_mode {

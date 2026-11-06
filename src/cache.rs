@@ -347,7 +347,20 @@ impl HashCache {
     #[tracked]
     pub fn deposit(&self, offset: Expr<u32>, fluence: Expr<Fluence>) {
         let fl = self.weighted_fluence.atomic_ref(offset);
-        fl.fetch_add(fluence);
+        // Most deposits are partly zero: the cascades that a ray passes only get its
+        // transmittance, and the one it ends in only its radiance. Skip the atomics of zeros.
+        if fluence.x != 0.0 {
+            fl.x.fetch_add(fluence.x);
+        }
+        if fluence.y != 0.0 {
+            fl.y.fetch_add(fluence.y);
+        }
+        if fluence.z != 0.0 {
+            fl.z.fetch_add(fluence.z);
+        }
+        if fluence.w != 0.0 {
+            fl.w.fetch_add(fluence.w);
+        }
         self.weights.atomic_ref(offset).fetch_add(1.0);
     }
     #[tracked]

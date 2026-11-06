@@ -128,8 +128,10 @@ impl SplatData {
                     );
                     let texture_offset = probe_pos * size;
 
+                    // The octahedral map mirrors across each edge: the border texel next to column `w`
+                    // continues the map at column `res + 1 - w`.
                     let write_index = dispatch_id().y + 1;
-                    let read_index = res + 2 - write_index;
+                    let read_index = res + 1 - write_index;
                     let side = dispatch_id().z;
                     let near = side % 2 == 0;
                     let write_pos = Vec2::expr(
@@ -156,9 +158,9 @@ impl SplatData {
                         probe_index / self.irradiance_dims.x,
                     );
                     let corner = Vec2::expr(dispatch_id().y % 2, dispatch_id().y / 2);
-                    // Irradiance
+                    // Irradiance. A corner continues the map at the opposite corner of the interior.
                     let write_pos = corner * (self.irradiance_resolution + 1);
-                    let read_pos = (1 - corner) * (self.irradiance_resolution) + 1;
+                    let read_pos = (1 - corner) * (self.irradiance_resolution - 1) + 1;
                     let value = self
                         .irradiance
                         .read(probe_pos * self.irradiance_size() + read_pos);

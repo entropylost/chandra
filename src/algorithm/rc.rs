@@ -2,7 +2,8 @@ use std::ops::Deref;
 use std::sync::Arc;
 
 use keter::lang::functions::{
-    sync_block, thread_id, warp_active_count_bits, warp_prefix_count_bits, warp_read_lane_at,
+    sync_block, thread_id, warp_active_count_bits, warp_is_first_active_lane,
+    warp_prefix_count_bits, warp_read_first_active_lane, warp_read_lane_at,
 };
 use parking_lot::Mutex;
 use serde::Deserialize;
@@ -467,7 +468,20 @@ impl RcData {
                         node.data_offset + encoder.grid_to_linear(encoder.quantize(ray.dir)),
                         fluence,
                     );
-                    self.probe_quality.atomic_ref(node.index).fetch_add(1.0);
+                    // Neighboring pixels append their rays next to each other, so the lanes of a
+                    // warp mostly deposit into the same few probes. Count each probe once per warp.
+                    loop {
+                        let index = warp_read_first_active_lane(node.index);
+                        if node.index == index {
+                            let count = warp_active_count_bits(true);
+                            if warp_is_first_active_lane() {
+                                self.probe_quality
+                                    .atomic_ref(index)
+                                    .fetch_add(count.cast_f32());
+                            }
+                            break;
+                        }
+                    }
                 }
             }),
             [rays.len() as u32, 1, 1],

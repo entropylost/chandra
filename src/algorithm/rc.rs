@@ -2,7 +2,8 @@ use std::ops::Deref;
 use std::sync::Arc;
 
 use keter::lang::functions::{
-    sync_block, thread_id, warp_active_count_bits, warp_prefix_count_bits, warp_read_lane_at,
+    sync_block, thread_id, warp_active_count_bits, warp_is_first_active_lane,
+    warp_prefix_count_bits, warp_read_first_active_lane, warp_read_lane_at,
 };
 use parking_lot::Mutex;
 use serde::Deserialize;
@@ -73,6 +74,12 @@ pub struct RcData {
     // not really used. might be worth handling.
     pub num_probes: Vec<u32>,
     pub max_probes: Vec<u32>,
+    // The insertions of the last frame that found no free slot, per cascade.
+    pub failed_inserts: Vec<u32>,
+    // Coarsens probe LODs when the table is near capacity, so overflow degrades resolution
+    // instead of leaving pixels without probes. Updated from `num_probes` and `failed_inserts`
+    // each frame.
+    pub lod_bias: f32,
 
     pub config: RcConfig,
 }
@@ -148,8 +155,30 @@ impl RcData {
                 .create_buffer_from_fn(cache.total_probes() as usize, |_| Default::default()),
             num_probes: vec![0; cache.num_cascades as usize],
             max_probes: vec![0; cache.num_cascades as usize],
+            failed_inserts: vec![0; cache.num_cascades as usize],
+            lod_bias: 0.0,
             cache,
             config,
+        }
+    }
+    // Call after `reset_table`. One LOD step quarters the surface probe count, so small
+    // steps with hysteresis keep the occupancy in band without visibly popping. The demand
+    // counts the probes that found no slot, so an overloaded view raises the bias by half of
+    // the steps that would bring it back to 75% at once, instead of by 0.05 per frame.
+    pub fn update_lod_bias(&mut self) {
+        const HIGH_WATER: f32 = 0.85;
+        const TARGET: f32 = 0.75;
+        const LOW_WATER: f32 = 0.7;
+        let pressure = (0..self.cache.num_cascades)
+            .map(|c| {
+                let demand = self.num_probes[c as usize] + self.failed_inserts[c as usize];
+                demand as f32 / self.cache.max_probes_at_cascade(c) as f32
+            })
+            .fold(0.0, f32::max);
+        if pressure > HIGH_WATER {
+            self.lod_bias += ((pressure / TARGET).log2() / 4.0).max(0.05);
+        } else if pressure < LOW_WATER {
+            self.lod_bias = (self.lod_bias - 0.01).max(0.0);
         }
     }
     pub fn last_cascade(&self) -> u32 {
@@ -439,7 +468,20 @@ impl RcData {
                         node.data_offset + encoder.grid_to_linear(encoder.quantize(ray.dir)),
                         fluence,
                     );
-                    self.probe_quality.atomic_ref(node.index).fetch_add(1.0);
+                    // Neighboring pixels append their rays next to each other, so the lanes of a
+                    // warp mostly deposit into the same few probes. Count each probe once per warp.
+                    loop {
+                        let index = warp_read_first_active_lane(node.index);
+                        if node.index == index {
+                            let count = warp_active_count_bits(true);
+                            if warp_is_first_active_lane() {
+                                self.probe_quality
+                                    .atomic_ref(index)
+                                    .fetch_add(count.cast_f32());
+                            }
+                            break;
+                        }
+                    }
                 }
             }),
             [rays.len() as u32, 1, 1],
@@ -451,6 +493,11 @@ impl RcData {
         const ZEROS: [u32; 1024] = [0_u32; 1024];
 
         let table = &self.cache.table;
+
+        // Before the reset, the freelist indices count this frame's insertions, the failed ones too.
+        let freelist_index = Arc::new(Mutex::new(vec![0_u32; self.num_cascades as usize]));
+        *commands += table.freelist_index.copy_to_shared(&freelist_index);
+
         let clear_entries = dispatch0(
             track!(|| {
                 table
@@ -493,7 +540,20 @@ impl RcData {
 
         commands.execute();
 
-        self.num_probes = total_occupied.lock().to_vec();
+        let kept_probes = std::mem::replace(&mut self.num_probes, total_occupied.lock().to_vec());
+
+        // The insertions had the slots that the probes kept by the last reset left free.
+        self.failed_inserts = freelist_index
+            .lock()
+            .iter()
+            .enumerate()
+            .map(|(c, &index)| {
+                let capacity = self.cache.max_probes_at_cascade(c as u32);
+                // saturating: the buffer is uninitialized before the first reset
+                let inserts = index.saturating_sub(self.cache.get_index_offset_host(c as u32));
+                inserts.saturating_sub(capacity - kept_probes[c].min(capacity))
+            })
+            .collect();
 
         let last_occupied_index = last_occupied_index.lock();
         self.max_probes = last_occupied_index
@@ -563,7 +623,9 @@ impl RcData {
                     let probe = self.cache.quantize(world_pos, lod, 0.expr());
 
                     let node = self.cache.get(probe);
-                    self.probe_lifetime.write(node.index, self.max_lifetime);
+                    if node.loaded() {
+                        self.probe_lifetime.write(node.index, self.max_lifetime);
+                    }
                 });
             }))
         })
@@ -583,6 +645,9 @@ impl RcData {
                 let probe = self.cache.quantize(world_pos, lod, 0.expr());
 
                 let node = self.cache.get(probe);
+                if node.invalid() {
+                    return;
+                }
                 self.probe_lifetime
                     .write(node.index, self.secondary_lifetime);
             }))
@@ -601,6 +666,9 @@ impl RcData {
                 let probe = self.cache.decode(key, cascade);
                 let node = self.cache.load_index(probe, index);
                 let next = self.cache.get(probe.next_nearest());
+                if next.invalid() {
+                    return;
+                }
                 self.probe_lifetime
                     .atomic_ref(next.index)
                     .fetch_max(self.probe_lifetime.read(node.index));
@@ -631,9 +699,11 @@ impl RcData {
                         let probe = self.cache.quantize(world_pos, lod, cascade);
                         let node = self.cache.get(probe);
 
-                        self.average_position
-                            .atomic_ref(node.index)
-                            .add_sample(world_pos);
+                        if node.loaded() {
+                            self.average_position
+                                .atomic_ref(node.index)
+                                .add_sample(world_pos);
+                        }
                     });
                 }),
                 [

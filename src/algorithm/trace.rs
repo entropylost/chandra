@@ -90,7 +90,10 @@ impl TraceData {
                     return;
                 }
                 let next = node.probe.next_nearest();
-                let next = rc.cache.get(next); // must exist
+                let next = rc.cache.get(next); // must exist, unless the table overflowed
+                if next.invalid() {
+                    return;
+                }
 
                 self.ray_count
                     .atomic_ref(next.index)
@@ -123,6 +126,9 @@ impl TraceData {
             dispatch1(
                 track!(|cascade| {
                     let node = rc.cache.get_occupied(cascade, dispatch_id().x);
+                    if node.invalid() {
+                        return;
+                    }
                     let lower_nodes = <[LoadedNode; 8]>::var_zeroed();
                     let counts = <[u32; 8]>::var_zeroed();
                     let j = 0_u32.var();

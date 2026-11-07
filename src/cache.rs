@@ -198,6 +198,8 @@ impl ProbeExpr {
 #[derive(Debug, Clone, Copy, Value, Default)]
 pub struct Projection {
     view_pos: Vec3<f32>,
+    // Added to the LOD index; raised when the probe table is close to full.
+    lod_bias: f32,
 }
 
 #[derive(Debug)]
@@ -239,16 +241,18 @@ impl HashCache {
 
             table: HashTable::new(
                 num_cascades,
-                base_probes * 4, // Can use an overly large amount to reduce collisions.
+                4, // Entries per probe. Can use an overly large amount to reduce collisions.
                 (0..num_cascades).map(|level| base_probes >> (level * 2)),
             ),
             weighted_fluence: DEVICE.create_buffer_from_fn(num_data, |_| Vec4::splat(0.0)),
             weights: DEVICE.create_buffer_from_fn(num_data, |_| 0.0),
         }
     }
-    pub fn set_view(&self, view: View) -> NodeConfigs<'static> {
-        self.projection
-            .write_host(Projection { view_pos: view.pos })
+    pub fn set_view(&self, view: View, lod_bias: f32) -> NodeConfigs<'static> {
+        self.projection.write_host(Projection {
+            view_pos: view.pos,
+            lod_bias,
+        })
     }
     pub fn total_probes(&self) -> u32 {
         self.table.data_capacity()
@@ -295,8 +299,9 @@ impl HashCache {
     }
     #[tracked]
     pub fn estimate_lod(&self, pos: Expr<Vec3<f32>>) -> Expr<u32> {
-        let radius = (pos - self.projection().view_pos).abs().reduce_max();
-        keter::max((radius / self.base_radius).log2(), 0.0)
+        let projection = self.projection();
+        let radius = (pos - projection.view_pos).abs().reduce_max();
+        keter::max((radius / self.base_radius).log2() + projection.lod_bias, 0.0)
             .ceil()
             .cast_u32()
     }
@@ -310,8 +315,12 @@ impl HashCache {
             // Don't do LODs
             f(self.estimate_lod(pos), 0.expr(), 1.0.expr());
         } else {
-            let radius = (pos - self.projection().view_pos).abs().reduce_max();
-            let lod_index = keter::max((radius / self.base_radius).log2(), -0.9);
+            let projection = self.projection();
+            let radius = (pos - projection.view_pos).abs().reduce_max();
+            let lod_index = keter::max(
+                (radius / self.base_radius).log2() + projection.lod_bias,
+                -0.9,
+            );
             let blending_factor =
                 keter::min(1.0, (1.0 - lod_index.fract()) / self.blending_radius.log2());
             let lower_lod = lod_index.ceil().cast_u32();
@@ -338,7 +347,20 @@ impl HashCache {
     #[tracked]
     pub fn deposit(&self, offset: Expr<u32>, fluence: Expr<Fluence>) {
         let fl = self.weighted_fluence.atomic_ref(offset);
-        fl.fetch_add(fluence);
+        // Most deposits are partly zero: the cascades that a ray passes only get its
+        // transmittance, and the one it ends in only its radiance. Skip the atomics of zeros.
+        if fluence.x != 0.0 {
+            fl.x.fetch_add(fluence.x);
+        }
+        if fluence.y != 0.0 {
+            fl.y.fetch_add(fluence.y);
+        }
+        if fluence.z != 0.0 {
+            fl.z.fetch_add(fluence.z);
+        }
+        if fluence.w != 0.0 {
+            fl.w.fetch_add(fluence.w);
+        }
         self.weights.atomic_ref(offset).fetch_add(1.0);
     }
     #[tracked]

@@ -1,4 +1,4 @@
-use keter::lang::functions::{block_id, sync_block, thread_id, warp_active_sum, warp_read_lane_at};
+use keter::lang::functions::{block_id, sync_block, thread_id, warp_read_lane_at};
 use yesod::color::inferno;
 use yesod::direction::OctahedralEncoder;
 use yesod::shapes::intersect_sphere;
@@ -54,7 +54,6 @@ impl SplatData {
     fn irradiance_size(&self) -> u32 {
         self.irradiance_resolution + 2
     }
-    // could switch to gather instead.
     pub fn calculate_irradiance(&self, rc: &RcData) -> NodeConfigs<'static> {
         dispatch0(
             track!(|| {
@@ -67,6 +66,11 @@ impl SplatData {
                     return;
                 }
 
+                // Each thread loads a direction of the probe, then gathers texels of the irradiance map from all
+                // the directions, which takes fewer instructions than summing every texel across the warp.
+                let radiances = Shared::<Vec4<f32>>::new(32);
+                let dirs = Shared::<Vec4<f32>>::new(32);
+
                 let radiance = rc.base_radiance.read(node.data_offset + dispatch_id().y);
                 let radiance = if radiance.is_finite().all() {
                     radiance.extend(1.0)
@@ -77,93 +81,53 @@ impl SplatData {
                     .cache
                     .get_encoder(0.expr())
                     .linear_to_dir(dispatch_id().y);
+                radiances.write(dispatch_id().y, radiance);
+                dirs.write(dispatch_id().y, dir.extend(0.0));
+                sync_block();
 
-                for index in 0..self.irradiance_resolution.pow(2) {
-                    let index = Vec2::expr(
-                        index % self.irradiance_resolution,
-                        index / self.irradiance_resolution,
-                    );
-                    let offset = (index.cast_f32() + 0.5) / self.irradiance_resolution as f32;
-                    let out_dir = OctahedralEncoder::decode(offset);
-                    let weight = keter::max(out_dir.dot(dir), 0.0);
-                    let deposit = radiance * weight;
-                    let deposit = Vec4::expr(
-                        warp_active_sum(deposit.x),
-                        warp_active_sum(deposit.y),
-                        warp_active_sum(deposit.z),
-                        warp_active_sum(deposit.w),
-                    );
-                    if dispatch_id().y == 0 {
-                        let tile = Vec2::expr(
-                            dispatch_id().x % self.irradiance_dims.x,
-                            dispatch_id().x / self.irradiance_dims.x,
-                        );
-                        let uv = tile * self.irradiance_size() + index + 1;
-                        self.irradiance.write(uv, deposit);
+                let tile = Vec2::expr(
+                    dispatch_id().x % self.irradiance_dims.x,
+                    dispatch_id().x / self.irradiance_dims.x,
+                );
+                // Every texel of the tile, its border included, so the borders need no copy pass. With
+                // 6x6 texels the tile has 64, which takes as many passes over the warp as the 36 inside.
+                let res = self.irradiance_resolution;
+                let size = self.irradiance_size();
+                let texels = size * size;
+                for pass in 0..texels.div_ceil(32) {
+                    let index = dispatch_id().y + pass * 32;
+                    if index < texels {
+                        let texel = Vec2::expr(index % size, index / size);
+                        // The octahedral map mirrors across each edge: a border texel left or right of the
+                        // interior continues it at the mirrored row, one above or below at the mirrored
+                        // column, and a corner at the opposite corner of the interior.
+                        let source = if texel.x == 0 || texel.x == res + 1 {
+                            let x = if texel.x == 0 { 1_u32.expr() } else { res.expr() };
+                            Vec2::expr(x, res + 1 - texel.y)
+                        } else {
+                            texel
+                        };
+                        let source = if source.y == 0 || source.y == res + 1 {
+                            let y = if source.y == 0 { 1_u32.expr() } else { res.expr() };
+                            Vec2::expr(res + 1 - source.x, y)
+                        } else {
+                            source
+                        };
+                        let offset = (source.cast_f32() - 0.5) / res as f32;
+                        let out_dir = OctahedralEncoder::decode(offset);
+                        let total = Vec4::splat(0.0_f32).var();
+                        for i in 0..32_u32 {
+                            let weight = keter::max(out_dir.dot(dirs.read(i).xyz()), 0.0);
+                            *total += radiances.read(i) * weight;
+                        }
+                        let uv = tile * size + texel;
+                        self.irradiance.write(uv, **total);
                     }
                 }
             }),
             [rc.max_probes[0], 32, 1],
         )
         .debug("Calculate Irradiance")
-    }
-    pub fn copy_irradiance_borders(&self, rc: &RcData) -> NodeConfigs<'static> {
-        (
-            dispatch0(
-                track!(|| {
-                    set_block_size([1, 8, 4]);
-                    let size = self.irradiance_size();
-                    let res = self.irradiance_resolution;
-
-                    let probe_index = dispatch_id().x;
-                    let probe_pos = Vec2::expr(
-                        probe_index % self.irradiance_dims.x,
-                        probe_index / self.irradiance_dims.x,
-                    );
-                    let texture_offset = probe_pos * size;
-
-                    let write_index = dispatch_id().y + 1;
-                    let read_index = res + 2 - write_index;
-                    let side = dispatch_id().z;
-                    let near = side % 2 == 0;
-                    let write_pos = Vec2::expr(
-                        write_index,
-                        if near { 0_u32.expr() } else { (res + 1).expr() },
-                    );
-                    let read_pos =
-                        Vec2::expr(read_index, if near { 1_u32.expr() } else { res.expr() });
-                    let horiz = side / 2 == 0;
-                    let write_pos = if horiz { write_pos } else { write_pos.yx() };
-                    let read_pos = if horiz { read_pos } else { read_pos.yx() };
-                    let value = self.irradiance.read(texture_offset + read_pos);
-                    self.irradiance.write(texture_offset + write_pos, value);
-                }),
-                [rc.max_probes[0], self.irradiance_resolution, 4],
-            )
-            .debug("Copy Irradiance Borders"),
-            dispatch0(
-                track!(|| {
-                    set_block_size([8, 4, 1]);
-                    let probe_index = dispatch_id().x;
-                    let probe_pos = Vec2::expr(
-                        probe_index % self.irradiance_dims.x,
-                        probe_index / self.irradiance_dims.x,
-                    );
-                    let corner = Vec2::expr(dispatch_id().y % 2, dispatch_id().y / 2);
-                    // Irradiance
-                    let write_pos = corner * (self.irradiance_resolution + 1);
-                    let read_pos = (1 - corner) * (self.irradiance_resolution) + 1;
-                    let value = self
-                        .irradiance
-                        .read(probe_pos * self.irradiance_size() + read_pos);
-                    self.irradiance
-                        .write(probe_pos * self.irradiance_size() + write_pos, value);
-                }),
-                [rc.max_probes[0], 4, 1],
-            )
-            .debug("Copy Irradiance Corners"),
-        )
-            .chain()
     }
     #[tracked]
     fn get_lambertian_weight(

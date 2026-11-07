@@ -7,6 +7,12 @@ pub type Key = u64;
 
 pub const INVALID_KEY: Key = Key::MAX;
 
+// The most entries that a lookup or an insertion probes. After a reset the tables are at most
+// a quarter full, so the probe sequences are short. But the insertions of a frame also claim
+// entries for the probes that get no slot, so a view that needs more probes than a table has
+// entries fills it up, and an unbounded probe never ends.
+const MAX_PROBES: u32 = 64;
+
 #[tracked]
 fn hash(key: Expr<Key>) -> Expr<u32> {
     yesod::rand::pcg3d(Vec3::expr((key >> 32).cast_u32(), key.cast_u32(), 937)).x
@@ -111,6 +117,7 @@ impl HashTable {
     fn insert_entry_index(&self, key: Expr<Key>, table: Expr<u32>, index: Expr<u32>) {
         let entry_index = (hash(key) % self.entry_capacity).var();
         let offset = self.entry_capacity * table;
+        let steps = 0_u32.var();
         loop {
             let entry = self.entries.atomic_ref(entry_index + offset);
             let prev = entry.key.compare_exchange(INVALID_KEY, key);
@@ -123,6 +130,10 @@ impl HashTable {
                 break;
             }
 
+            *steps += 1;
+            if steps == MAX_PROBES {
+                break;
+            }
             *entry_index = (entry_index + self.probing_step()) % self.entry_capacity;
         }
     }
@@ -131,6 +142,7 @@ impl HashTable {
     pub fn insert(&self, key: Expr<Key>, table: Expr<u32>, on_insert: impl Fn(Expr<u32>)) {
         let entry_index = (hash(key) % self.entry_capacity).var();
         let offset = self.entry_capacity * table;
+        let steps = 0_u32.var();
         loop {
             let entry = self.entries.atomic_ref(offset + entry_index);
             let prev = entry.key.compare_exchange(INVALID_KEY, key);
@@ -152,6 +164,10 @@ impl HashTable {
                 on_insert(index);
                 break;
             }
+            *steps += 1;
+            if steps == MAX_PROBES {
+                break;
+            }
             *entry_index = (entry_index + self.probing_step()) % self.entry_capacity;
         }
     }
@@ -160,12 +176,17 @@ impl HashTable {
         let entry_index = (hash(key) % self.entry_capacity).var();
         let offset = self.entry_capacity * table;
         let result = u32::MAX.var();
+        let steps = 0_u32.var();
         loop {
             let entry = self.entries.read(offset + entry_index);
             if entry.key == key {
                 *result = entry.value.index;
                 break;
             } else if entry.key == INVALID_KEY {
+                break;
+            }
+            *steps += 1;
+            if steps == MAX_PROBES {
                 break;
             }
             *entry_index = (entry_index + self.probing_step()) % self.entry_capacity;
@@ -189,8 +210,12 @@ impl HashTable {
                 *cost = u32::MAX;
                 break;
             }
-            *entry_index = (entry_index + self.probing_step()) % self.entry_capacity;
             *cost += 1;
+            if cost == MAX_PROBES {
+                *cost = u32::MAX;
+                break;
+            }
+            *entry_index = (entry_index + self.probing_step()) % self.entry_capacity;
         }
         **cost
     }
